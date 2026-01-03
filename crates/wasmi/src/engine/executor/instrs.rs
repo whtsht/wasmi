@@ -1,25 +1,23 @@
+use std::{collections::HashMap, vec::Vec};
+
 pub use self::call::dispatch_host_func;
 use super::{cache::CachedInstance, InstructionPtr, Stack};
 use crate::{
     core::{hint, wasm, ReadAs, UntypedVal, WriteAs},
     engine::{
         code_map::CodeMap,
-        executor::stack::{CallFrame, FrameSlots, ValueStack},
+        executor::{
+            gen_code,
+            stack::{CallFrame, FrameSlots, ValueStack},
+        },
         utils::unreachable_unchecked,
-        DedupFuncType,
-        EngineFunc,
+        DedupFuncType, EngineFunc,
     },
     ir::{index, BlockFuel, Const16, Offset64Hi, Op, ShiftAmount, Slot},
     memory::DataSegment,
     store::{PrunedStore, StoreInner},
     table::ElementSegment,
-    Error,
-    Func,
-    Global,
-    Memory,
-    Ref,
-    Table,
-    TrapCode,
+    Error, Func, Global, Memory, Ref, Table, TrapCode,
 };
 
 #[cfg(doc)]
@@ -87,7 +85,7 @@ pub fn execute_instrs<'engine>(
 
 /// An execution context for executing a Wasmi function frame.
 #[derive(Debug)]
-struct Executor<'engine> {
+pub struct Executor<'engine> {
     /// Stores the value stack of live values on the Wasm stack.
     sp: FrameSlots,
     /// The pointer to the currently executed instruction.
@@ -100,6 +98,16 @@ struct Executor<'engine> {
     ///
     /// [`Engine`]: crate::Engine
     code_map: &'engine CodeMap,
+
+    ip_counter: HashMap<InstructionPtr, u32>,
+    instr_trace: HashMap<InstructionPtr, Vec<TraceEntry>>,
+    current_trace_id: Option<InstructionPtr>,
+}
+
+#[derive(Debug)]
+pub struct TraceEntry {
+    pub(crate) op: Op,
+    pub(crate) ip: InstructionPtr,
 }
 
 impl<'engine> Executor<'engine> {
@@ -125,14 +133,63 @@ impl<'engine> Executor<'engine> {
             cache,
             stack,
             code_map,
+            ip_counter: HashMap::new(),
+            instr_trace: HashMap::new(),
+            current_trace_id: None,
         }
     }
+
+    fn run_jit(&mut self, ip: &InstructionPtr) -> InstructionPtr {
+        let trace = self.instr_trace.get(ip).unwrap();
+        let code = gen_code::compile_trace(trace, &self.sp).unwrap();
+
+        unsafe {
+           let ptr = (code.func)(self.sp.as_ptr() as *mut u64);
+           InstructionPtr::new(ptr as *const Op)
+        }
+    }
+
+    const HOT_PATH_THRESHOLD: u32 = 100;
+    const TRACE_MAX_LENGTH: usize = 200;
 
     /// Executes the function frame until it returns or traps.
     #[inline(always)]
     fn execute(&mut self, store: &mut PrunedStore) -> Result<(), Error> {
         use Op as Instr;
         loop {
+            let count = self
+                .ip_counter
+                .entry(self.ip)
+                .and_modify(|counter| *counter += 1)
+                .or_insert(1);
+            if *count == Self::HOT_PATH_THRESHOLD {
+                if self.current_trace_id.is_none() {
+                    self.current_trace_id = Some(self.ip);
+                    self.instr_trace.insert(self.ip, Vec::new());
+                }
+            }
+
+            if let Some(trace_id) = self.current_trace_id {
+                // ループを一周したらトレース終了
+                let trace = self.instr_trace.get_mut(&trace_id).unwrap();
+                if trace_id == self.ip && !trace.is_empty() {
+                    self.current_trace_id = None;
+                    let ip = self.run_jit(&trace_id);
+                    self.ip = ip;
+                } else {
+                    trace.push(TraceEntry {
+                        op: *self.ip.get(),
+                        ip: self.ip,
+                    });
+
+                    // トレースが長すぎる場合は中断
+                    if trace.len() > Self::TRACE_MAX_LENGTH {
+                        trace.clear();
+                        self.current_trace_id = None;
+                    }
+                }
+            }
+
             match *self.ip.get() {
                 Instr::Trap { trap_code } => self.execute_trap(trap_code)?,
                 Instr::ConsumeFuel { block_fuel } => {

@@ -30,6 +30,7 @@ mod cache;
 mod instr_ptr;
 mod instrs;
 mod stack;
+mod gen_code;
 
 impl EngineInner {
     /// Executes the given [`Func`] with the given `params` and returns the `results`.

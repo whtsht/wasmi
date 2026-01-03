@@ -29,6 +29,7 @@ spin = { version = "0.9", default-features = false, features = [
     "spin_mutex",
     "rwlock",
 ] }
+libc = "0.2.179"
 
 [dev-dependencies]
 assert_matches = "1.5"

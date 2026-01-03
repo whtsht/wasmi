@@ -10,8 +10,7 @@ use core::{
     fmt::{self, Debug},
     mem::{self, MaybeUninit},
     ops::Range,
-    ptr,
-    slice,
+    ptr, slice,
 };
 
 #[cfg(doc)]
@@ -405,6 +404,10 @@ impl FrameSlots {
     /// Creates a new [`FrameSlots`].
     fn new(ptr: *mut UntypedVal) -> Self {
         Self { ptr }
+    }
+
+    pub fn as_ptr(&self) -> *mut UntypedVal {
+        self.ptr
     }
 
     /// Returns the [`UntypedVal`] at the given [`Slot`].
