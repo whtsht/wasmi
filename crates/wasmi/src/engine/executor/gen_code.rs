@@ -6,6 +6,7 @@ use crate::ir::{Op, Slot};
 use libc::{mmap, mprotect, munmap, MAP_ANONYMOUS, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE};
 use std::borrow::ToOwned;
 use std::{cell::Cell, io, vec::Vec};
+use capstone::arch::BuildsCapstone;
 
 // fn(*slots) -> InstructionPtr
 pub type JitFn = unsafe extern "C" fn(*mut u64) -> usize;
@@ -42,14 +43,14 @@ fn slot_to_register(slot: Slot) -> Option<u8> {
         return None;
     }
     match slot_idx {
-        0 => Some(0),  // RAX
+        0 => Some(3),  // RBX (callee-saved)
         1 => Some(1),  // RCX
-        2 => Some(2),  // RDX
-        3 => Some(6),  // RSI
-        4 => Some(8),  // R8
-        5 => Some(9),  // R9
-        6 => Some(10), // R10
-        7 => Some(11), // R11
+        2 => Some(6),  // RSI
+        3 => Some(8),  // R8
+        4 => Some(9),  // R9
+        5 => Some(10), // R10
+        6 => Some(11), // R11
+        7 => Some(14), // R14 (callee-saved)
         _ => None,
     }
 }
@@ -150,12 +151,14 @@ fn emit_movzx_r64_r8(emit: &mut impl FnMut(&[u8]), dst: u8, src: u8) {
 }
 
 fn emit_prologue(emit: &mut impl FnMut(&[u8])) {
-    // R12, R13を退避 (callee-saved)
+    // callee-savedレジスタを退避
+    emit(&[0x53]); // PUSH RBX
     emit(&[0x41, 0x54]); // PUSH R12
     emit(&[0x41, 0x55]); // PUSH R13
+    emit(&[0x41, 0x56]); // PUSH R14
 
     // 8つのスロットをRDIからレジスタにロード
-    let registers = [0, 1, 2, 6, 8, 9, 10, 11]; // RAX, RCX, RDX, RSI, R8-R11
+    let registers = [3, 1, 6, 8, 9, 10, 11, 14]; // RBX, RCX, RSI, R8-R11, R14
     for (i, &reg) in registers.iter().enumerate() {
         emit_mov_from_memory(emit, reg, 7 /*RDI*/, (i * 8) as i32);
     }
@@ -163,15 +166,17 @@ fn emit_prologue(emit: &mut impl FnMut(&[u8])) {
 
 fn emit_epilogue(emit: &mut impl FnMut(&[u8]), next_ip: *const Op) {
     // レジスタの値をRDIに書き戻し、next_ipを返す
-    let registers = [0, 1, 2, 6, 8, 9, 10, 11];
+    let registers = [3, 1, 6, 8, 9, 10, 11, 14]; // RBX, RCX, RSI, R8-R11, R14
     for (i, &reg) in registers.iter().enumerate() {
         emit_mov_to_memory(emit, 7 /*RDI*/, (i * 8) as i32, reg);
     }
     emit_mov_imm64(emit, 0 /*RAX*/, next_ip as usize as u64);
 
-    // R12, R13を復元 (callee-saved)
+    // callee-savedレジスタを復元（PUSH の逆順）
+    emit(&[0x41, 0x5E]); // POP R14
     emit(&[0x41, 0x5D]); // POP R13
     emit(&[0x41, 0x5C]); // POP R12
+    emit(&[0x5B]); // POP RBX
 
     emit(&[0xC3]); // RET
 }
@@ -353,6 +358,7 @@ fn emit_branch_i32_lt_u_imm16_rhs(
 }
 
 pub fn compile_trace(trace: &[TraceEntry], fs: &FrameSlots) -> io::Result<JitCode> {
+    std::println!("{:?}", trace);
     let buffer = unsafe {
         mmap(
             std::ptr::null_mut(),
@@ -486,6 +492,49 @@ pub fn compile_trace(trace: &[TraceEntry], fs: &FrameSlots) -> io::Result<JitCod
     }
 
     let func: JitFn = unsafe { std::mem::transmute(start) };
+
+    std::println!("Generated machine code ({} bytes):", offset.get());
+    let code_slice = unsafe { std::slice::from_raw_parts(start, offset.get()) };
+    for (i, chunk) in code_slice.chunks(16).enumerate() {
+        std::print!("{:04x}: ", i * 16);
+        for byte in chunk {
+            std::print!("{:02x} ", byte);
+        }
+        std::println!();
+    }
+
+    std::println!("\nDisassembly:");
+    match capstone::Capstone::new()
+        .x86()
+        .mode(capstone::arch::x86::ArchMode::Mode64)
+        .build()
+    {
+        Ok(cs) => {
+            match cs.disasm_all(code_slice, start as u64) {
+                Ok(insns) => {
+                    for insn in insns.iter() {
+                        let bytes_str = insn.bytes().iter()
+                            .map(|b| std::format!("{:02x}", b))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        let asm_str = std::format!(
+                            "{} {}",
+                            insn.mnemonic().unwrap_or(""),
+                            insn.op_str().unwrap_or("")
+                        );
+                        std::println!(
+                            "{:04x}: {:30} {}",
+                            insn.address() - start as u64,
+                            bytes_str,
+                            asm_str
+                        );
+                    }
+                }
+                Err(e) => std::println!("Disassembly failed: {}", e),
+            }
+        }
+        Err(e) => std::println!("Capstone init failed: {}", e),
+    }
 
     Ok(JitCode {
         func,

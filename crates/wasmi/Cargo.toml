@@ -30,6 +30,7 @@ spin = { version = "0.9", default-features = false, features = [
     "rwlock",
 ] }
 libc = "0.2.179"
+capstone = "0.12"
 
 [dev-dependencies]
 assert_matches = "1.5"
