@@ -144,8 +144,8 @@ impl<'engine> Executor<'engine> {
         let code = gen_code::compile_trace(trace, &self.sp).unwrap();
 
         unsafe {
-           let ptr = (code.func)(self.sp.as_ptr() as *mut u64);
-           InstructionPtr::new(ptr as *const Op)
+            let ptr = (code.func)(self.sp.as_ptr() as *mut u64);
+            InstructionPtr::new(ptr as *const Op)
         }
     }
 
@@ -174,7 +174,13 @@ impl<'engine> Executor<'engine> {
                 let trace = self.instr_trace.get_mut(&trace_id).unwrap();
                 if trace_id == self.ip && !trace.is_empty() {
                     self.current_trace_id = None;
+                    std::println!("slot(2): {:?}", unsafe { u64::from(self.sp.get(Slot::from(2))) });
+                    std::println!("slot(3): {:?}", unsafe { u64::from(self.sp.get(Slot::from(3))) });
+                    std::println!("slot(4): {:?}", unsafe { u64::from(self.sp.get(Slot::from(4))) });
                     let ip = self.run_jit(&trace_id);
+                    std::println!("slot(2): {:?}", unsafe { u64::from(self.sp.get(Slot::from(2))) });
+                    std::println!("slot(3): {:?}", unsafe { u64::from(self.sp.get(Slot::from(3))) });
+                    std::println!("slot(4): {:?}", unsafe { u64::from(self.sp.get(Slot::from(4))) });
                     self.ip = ip;
                 } else {
                     trace.push(TraceEntry {

@@ -328,16 +328,32 @@ fn emit_branch_i32_ne_imm16(
     lhs: Slot,
     rhs: i16,
     offset: &Cell<usize>,
+    taken: bool,
     epilogue_jmp_offsets: &mut Vec<usize>,
+    is_last: bool,
+    loop_start_offset: usize,
 ) {
     let lhs_reg = get_operand_reg(emit, fs, lhs, 12);
     emit_cmp_r32_imm(emit, lhs_reg, rhs);
 
-    // JE (等しい場合=分岐失敗) → エピローグへ
-    // エピローグのアドレスは後で埋める
-    emit(&[0x0F, 0x84]); // JE rel32
-    epilogue_jmp_offsets.push(offset.get()); // 相対オフセットを書き込む位置
-    emit(&[0, 0, 0, 0]); // プレースホルダー
+    if taken {
+        // トレース: lhs != rhs でジャンプした → lhs == rhs ならJIT終了
+        emit(&[0x0F, 0x84]); // JE rel32
+    } else {
+        // トレース: lhs == rhs でジャンプしなかった → ガード: lhs != rhs ならエピローグへ
+        emit(&[0x0F, 0x85]); // JNE rel32
+    }
+    epilogue_jmp_offsets.push(offset.get());
+    emit(&[0, 0, 0, 0]);
+
+    // トレースの最後の命令ならループバック
+    if is_last {
+        let current_pos = offset.get();
+        let next_instr_pos = current_pos + 5; // sizeof(JMP rel32)
+        let relative_offset = (loop_start_offset as i32) - (next_instr_pos as i32);
+        emit(&[0xE9]); // JMP rel32
+        emit(&relative_offset.to_le_bytes());
+    }
 }
 
 fn emit_branch_i32_lt_u_imm16_rhs(
@@ -346,15 +362,32 @@ fn emit_branch_i32_lt_u_imm16_rhs(
     lhs: Slot,
     rhs: i16,
     offset: &Cell<usize>,
+    taken: bool,
     epilogue_jmp_offsets: &mut Vec<usize>,
+    is_last: bool,
+    loop_start_offset: usize,
 ) {
     let lhs_reg = get_operand_reg(emit, fs, lhs, 12);
     emit_cmp_r32_imm(emit, lhs_reg, rhs);
 
-    // JAE (大なりイコール=分岐失敗) → エピローグへ
-    emit(&[0x0F, 0x83]); // JAE rel32
+    if taken {
+        // トレース記録時: lhs < rhs でジャンプした → lhs >= rhs ならJIT終了
+        emit(&[0x0F, 0x83]); // JAE rel32
+    } else {
+        // トレース記録時: lhs >= rhs でジャンプしなかった → lhs < rhs ならJIT終了
+        emit(&[0x0F, 0x82]); // JB rel32
+    }
     epilogue_jmp_offsets.push(offset.get());
     emit(&[0, 0, 0, 0]);
+
+    // トレースの最後の命令ならループバック
+    if is_last {
+        let current_pos = offset.get();
+        let next_instr_pos = current_pos + 5; // sizeof(JMP rel32)
+        let relative_offset = (loop_start_offset as i32) - (next_instr_pos as i32);
+        emit(&[0xE9]); // JMP rel32
+        emit(&relative_offset.to_le_bytes());
+    }
 }
 
 pub fn compile_trace(trace: &[TraceEntry], fs: &FrameSlots) -> io::Result<JitCode> {
@@ -400,6 +433,7 @@ pub fn compile_trace(trace: &[TraceEntry], fs: &FrameSlots) -> io::Result<JitCod
 
     emit_prologue(&mut emit);
 
+    let loop_start_offset = offset.get();
     let mut epilogue_jmp_offsets = Vec::new();
 
     let mut i = 0;
@@ -419,13 +453,22 @@ pub fn compile_trace(trace: &[TraceEntry], fs: &FrameSlots) -> io::Result<JitCod
             }
             Op::BranchI32NeImm16 { lhs, rhs, .. } => {
                 let rhs_val = i16::try_from(i32::from(rhs)).unwrap();
+                let taken = if i + 1 < trace.len() {
+                    (trace[i + 1].ip.ptr as usize - entry.ip.ptr as usize) != 8
+                } else {
+                    true
+                };
+                let is_last = i == trace.len() - 1;
                 emit_branch_i32_ne_imm16(
                     &mut emit,
                     fs,
                     lhs,
                     rhs_val,
                     &offset,
+                    taken,
                     &mut epilogue_jmp_offsets,
+                    is_last,
+                    loop_start_offset,
                 );
             }
             Op::Copy2 { results, values } => {
@@ -455,13 +498,22 @@ pub fn compile_trace(trace: &[TraceEntry], fs: &FrameSlots) -> io::Result<JitCod
             }
             Op::BranchI32LtUImm16Rhs { lhs, rhs, .. } => {
                 let rhs_val = i16::try_from(u32::from(rhs)).unwrap();
+                let taken = if i + 1 < trace.len() {
+                    (trace[i + 1].ip.ptr as usize - entry.ip.ptr as usize) != 8
+                } else {
+                    true
+                };
+                let is_last = i == trace.len() - 1;
                 emit_branch_i32_lt_u_imm16_rhs(
                     &mut emit,
                     fs,
                     lhs,
                     rhs_val,
                     &offset,
+                    taken,
                     &mut epilogue_jmp_offsets,
+                    is_last,
+                    loop_start_offset,
                 );
             }
             _ => panic!("Unsupported instruction in trace: {:?}", entry.op),

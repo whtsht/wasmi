@@ -17,10 +17,10 @@
     },
   TraceEntry {
      op: Copy2 { results: FixedSlotSpan { span: SlotSpan(Slot(2)) }, values: [Slot(4), Slot(2)] },
-     ip: InstructionPtr { ptr: 0x559b6d9baad0 } }, 
+     ip: InstructionPtr { ptr: 0x559b6d9baad0 } },
 
   TraceEntry {
-     op: I32AddImm16 { result: Slot(7), lhs: Slot(1), rhs: Const16 { inner: AnyConst16 { bits: 1 }, marker: PhantomData<fn() -> i32> } }, ip: InstructionPtr { ptr: 0x559b6d9baad8 } }, 
+     op: I32AddImm16 { result: Slot(7), lhs: Slot(1), rhs: Const16 { inner: AnyConst16 { bits: 1 }, marker: PhantomData<fn() -> i32> } }, ip: InstructionPtr { ptr: 0x559b6d9baad8 } },
 
   TraceEntry { op: CopyImm32 { result: Slot(6), value: AnyConst32 { bits: 1000 } }, ip: InstructionPtr { ptr: 0x559b6d9baae0 } }, 
 
