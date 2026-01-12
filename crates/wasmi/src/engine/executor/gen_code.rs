@@ -3,10 +3,10 @@
 use crate::engine::executor::instrs::TraceEntry;
 use crate::engine::executor::stack::FrameSlots;
 use crate::ir::{Op, Slot};
+use capstone::arch::BuildsCapstone;
 use libc::{mmap, mprotect, munmap, MAP_ANONYMOUS, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE};
 use std::borrow::ToOwned;
 use std::{cell::Cell, io, vec::Vec};
-use capstone::arch::BuildsCapstone;
 
 // fn(*slots) -> InstructionPtr
 pub type JitFn = unsafe extern "C" fn(*mut u64) -> usize;
@@ -117,6 +117,15 @@ fn emit_xor_r64_r64(emit: &mut impl FnMut(&[u8]), dst: u8, src: u8) {
     emit(&[rex_byte, 0x31, modrm(3, src, dst)]);
 }
 
+/// AND dst(32bit), src(32bit)
+fn emit_and_r32_r32(emit: &mut impl FnMut(&[u8]), dst: u8, src: u8) {
+    if dst >= 8 || src >= 8 {
+        let rex_byte = rex(false, src, 0, dst);
+        emit(&[rex_byte]);
+    }
+    emit(&[0x21, modrm(3, src, dst)]);
+}
+
 /// CMP reg(32bit), imm
 fn emit_cmp_r32_imm(emit: &mut impl FnMut(&[u8]), reg: u8, imm: i16) {
     if reg >= 8 {
@@ -194,7 +203,13 @@ fn get_operand_reg(emit: &mut impl FnMut(&[u8]), fs: &FrameSlots, slot: Slot, te
     }
 }
 
-fn emit_i64_add(emit: &mut impl FnMut(&[u8]), fs: &FrameSlots, result: Slot, lhs: Slot, rhs: Slot) {
+fn prepare_binary_operands(
+    emit: &mut impl FnMut(&[u8]),
+    fs: &FrameSlots,
+    result: Slot,
+    lhs: Slot,
+    rhs: Slot,
+) -> (u8, u8, u8) {
     let result_reg = slot_to_register(result).unwrap();
     let lhs_reg = get_operand_reg(emit, fs, lhs, 12);
     let rhs_reg = get_operand_reg(emit, fs, rhs, 13);
@@ -203,9 +218,180 @@ fn emit_i64_add(emit: &mut impl FnMut(&[u8]), fs: &FrameSlots, result: Slot, lhs
         emit_mov_r64_r64(emit, result_reg, lhs_reg);
     }
 
+    (result_reg, lhs_reg, rhs_reg)
+}
+
+fn emit_i64_add(emit: &mut impl FnMut(&[u8]), fs: &FrameSlots, result: Slot, lhs: Slot, rhs: Slot) {
+    let (result_reg, _, rhs_reg) = prepare_binary_operands(emit, fs, result, lhs, rhs);
+
     // ADD result, rhs (REX.W + 0x01 + ModR/M)
     let rex_byte = rex(true, rhs_reg, 0, result_reg);
     emit(&[rex_byte, 0x01, modrm(3, rhs_reg, result_reg)]);
+}
+
+fn emit_i32_add(emit: &mut impl FnMut(&[u8]), fs: &FrameSlots, result: Slot, lhs: Slot, rhs: Slot) {
+    let (result_reg, _, rhs_reg) = prepare_binary_operands(emit, fs, result, lhs, rhs);
+
+    // ADD result, rhs (32bit: 0x01)
+    if result_reg >= 8 || rhs_reg >= 8 {
+        emit(&[rex(false, rhs_reg, 0, result_reg)]);
+    }
+    emit(&[0x01, modrm(3, rhs_reg, result_reg)]);
+}
+
+fn emit_i32_sub(emit: &mut impl FnMut(&[u8]), fs: &FrameSlots, result: Slot, lhs: Slot, rhs: Slot) {
+    let (result_reg, _, rhs_reg) = prepare_binary_operands(emit, fs, result, lhs, rhs);
+
+    // SUB result, rhs (32bit: 0x29)
+    if result_reg >= 8 || rhs_reg >= 8 {
+        emit(&[rex(false, rhs_reg, 0, result_reg)]);
+    }
+    emit(&[0x29, modrm(3, rhs_reg, result_reg)]);
+}
+
+fn emit_i32_mul(emit: &mut impl FnMut(&[u8]), fs: &FrameSlots, result: Slot, lhs: Slot, rhs: Slot) {
+    let (result_reg, _, rhs_reg) = prepare_binary_operands(emit, fs, result, lhs, rhs);
+
+    // IMUL result, rhs (32bit: 0x0F 0xAF)
+    if result_reg >= 8 || rhs_reg >= 8 {
+        emit(&[rex(false, result_reg, 0, rhs_reg)]);
+    }
+    emit(&[0x0F, 0xAF, modrm(3, result_reg, rhs_reg)]);
+}
+
+fn emit_i32_div_s(
+    emit: &mut impl FnMut(&[u8]),
+    fs: &FrameSlots,
+    result: Slot,
+    lhs: Slot,
+    rhs: Slot,
+) {
+    let lhs_reg = get_operand_reg(emit, fs, lhs, 12);
+    if lhs_reg != 0 {
+        emit_mov_r64_r64(emit, 0, lhs_reg);
+    }
+
+    // CDQ (符号拡張: EAX → EDX:EAX)
+    emit(&[0x99]);
+
+    // IDIV rhs (符号付き除算: 0xF7 /7)
+    let rhs_reg = get_operand_reg(emit, fs, rhs, 12);
+    if rhs_reg >= 8 {
+        emit(&[rex(false, 0, 0, rhs_reg)]);
+    }
+    emit(&[0xF7, modrm(3, 7, rhs_reg)]);
+
+    // 商はEAXに、resultに移動
+    let result_reg = slot_to_register(result).unwrap();
+    if result_reg != 0 {
+        emit_mov_r64_r64(emit, result_reg, 0);
+    }
+}
+
+fn emit_i32_div_u(
+    emit: &mut impl FnMut(&[u8]),
+    fs: &FrameSlots,
+    result: Slot,
+    lhs: Slot,
+    rhs: Slot,
+) {
+    let lhs_reg = get_operand_reg(emit, fs, lhs, 12);
+    if lhs_reg != 0 {
+        emit_mov_r64_r64(emit, 0, lhs_reg);
+    }
+
+    // XOR EDX, EDX (EDXクリア)
+    if 2 >= 8 {
+        emit(&[rex(false, 0, 0, 2)]);
+    }
+    emit(&[0x31, modrm(3, 2, 2)]);
+
+    // DIV rhs (符号なし除算: 0xF7 /6)
+    let rhs_reg = get_operand_reg(emit, fs, rhs, 12);
+    if rhs_reg >= 8 {
+        emit(&[rex(false, 0, 0, rhs_reg)]);
+    }
+    emit(&[0xF7, modrm(3, 6, rhs_reg)]);
+
+    // 商はEAXに、resultに移動
+    let result_reg = slot_to_register(result).unwrap();
+    if result_reg != 0 {
+        emit_mov_r64_r64(emit, result_reg, 0);
+    }
+}
+
+fn emit_i32_rem_s(
+    emit: &mut impl FnMut(&[u8]),
+    fs: &FrameSlots,
+    result: Slot,
+    lhs: Slot,
+    rhs: Slot,
+) {
+    let lhs_reg = get_operand_reg(emit, fs, lhs, 12);
+    if lhs_reg != 0 {
+        emit_mov_r64_r64(emit, 0, lhs_reg);
+    }
+
+    // CDQ (符号拡張: EAX → EDX:EAX)
+    emit(&[0x99]);
+
+    // IDIV rhs (符号付き除算: 0xF7 /7)
+    let rhs_reg = get_operand_reg(emit, fs, rhs, 12);
+    if rhs_reg >= 8 {
+        emit(&[rex(false, 0, 0, rhs_reg)]);
+    }
+    emit(&[0xF7, modrm(3, 7, rhs_reg)]);
+
+    // 余りはEDXに、resultに移動
+    let result_reg = slot_to_register(result).unwrap();
+    if result_reg != 2 {
+        emit_mov_r64_r64(emit, result_reg, 2);
+    }
+}
+
+fn emit_i32_rem_u(
+    emit: &mut impl FnMut(&[u8]),
+    fs: &FrameSlots,
+    result: Slot,
+    lhs: Slot,
+    rhs: Slot,
+) {
+    let lhs_reg = get_operand_reg(emit, fs, lhs, 12);
+    if lhs_reg != 0 {
+        emit_mov_r64_r64(emit, 0, lhs_reg);
+    }
+
+    // XOR EDX, EDX (EDXクリア)
+    if 2 >= 8 {
+        emit(&[rex(false, 0, 0, 2)]);
+    }
+    emit(&[0x31, modrm(3, 2, 2)]);
+
+    // DIV rhs (符号なし除算: 0xF7 /6)
+    let rhs_reg = get_operand_reg(emit, fs, rhs, 12);
+    if rhs_reg >= 8 {
+        emit(&[rex(false, 0, 0, rhs_reg)]);
+    }
+    emit(&[0xF7, modrm(3, 6, rhs_reg)]);
+
+    // 余りはEDXに、resultに移動
+    let result_reg = slot_to_register(result).unwrap();
+    if result_reg != 2 {
+        emit_mov_r64_r64(emit, result_reg, 2);
+    }
+}
+
+fn emit_i32_bitand(
+    emit: &mut impl FnMut(&[u8]),
+    fs: &FrameSlots,
+    result: Slot,
+    lhs: Slot,
+    rhs: Slot,
+) {
+    let (result_reg, _, rhs_reg) = prepare_binary_operands(emit, fs, result, lhs, rhs);
+
+    // AND result, rhs (32bit)
+    emit_and_r32_r32(emit, result_reg, rhs_reg);
 }
 
 // TODO: ゼロ除算チェック
@@ -230,6 +416,34 @@ fn emit_i64_rem_u(
     emit(&[rex_byte, 0xF7, modrm(3, 6, rhs_reg)]);
 
     // MOV result, RDX
+    let result_reg = slot_to_register(result).unwrap();
+    if result_reg != 2 {
+        emit_mov_r64_r64(emit, result_reg, 2);
+    }
+}
+
+fn emit_i32_rem_u_imm16_rhs(
+    emit: &mut impl FnMut(&[u8]),
+    fs: &FrameSlots,
+    result: Slot,
+    lhs: Slot,
+    rhs: u32,
+) {
+    let lhs_reg = get_operand_reg(emit, fs, lhs, 12);
+    if lhs_reg != 0 {
+        emit_mov_r64_r64(emit, 0, lhs_reg);
+    }
+
+    if 2 >= 8 {
+        emit(&[rex(false, 0, 0, 2)]);
+    }
+    emit(&[0x31, modrm(3, 2, 2)]);
+
+    emit_mov_r32_imm32(emit, 12, rhs);
+
+    let rex_byte = rex(false, 0, 0, 12);
+    emit(&[rex_byte, 0xF7, modrm(3, 6, 12)]);
+
     let result_reg = slot_to_register(result).unwrap();
     if result_reg != 2 {
         emit_mov_r64_r64(emit, result_reg, 2);
@@ -279,6 +493,57 @@ fn emit_i32_add_imm16(
         emit(&[0x81, modrm(3, 0, result_reg)]);
         emit(&(rhs as i32).to_le_bytes());
     }
+}
+
+fn emit_i32_bitand_imm16(
+    emit: &mut impl FnMut(&[u8]),
+    fs: &FrameSlots,
+    result: Slot,
+    lhs: Slot,
+    rhs: i16,
+) {
+    let result_reg = slot_to_register(result).unwrap();
+    let lhs_reg = get_operand_reg(emit, fs, lhs, 12);
+
+    if result_reg != lhs_reg {
+        emit_mov_r64_r64(emit, result_reg, lhs_reg);
+    }
+
+    if rhs >= -128 && rhs <= 127 {
+        // AND r32, imm8: 0x83 /4 + imm8
+        if result_reg >= 8 {
+            emit(&[rex(false, 0, 0, result_reg)]);
+        }
+        emit(&[0x83, modrm(3, 4, result_reg), rhs as u8]);
+    } else {
+        // AND r32, imm32: 0x81 /4 + imm32
+        if result_reg >= 8 {
+            emit(&[rex(false, 0, 0, result_reg)]);
+        }
+        emit(&[0x81, modrm(3, 4, result_reg)]);
+        emit(&(rhs as i32).to_le_bytes());
+    }
+}
+
+fn emit_i32_shl_by(
+    emit: &mut impl FnMut(&[u8]),
+    fs: &FrameSlots,
+    result: Slot,
+    lhs: Slot,
+    shift_amount: u8,
+) {
+    let result_reg = slot_to_register(result).unwrap();
+    let lhs_reg = get_operand_reg(emit, fs, lhs, 12);
+
+    if result_reg != lhs_reg {
+        emit_mov_r64_r64(emit, result_reg, lhs_reg);
+    }
+
+    // SHL r32, imm8: 0xC1 /4 + imm8
+    if result_reg >= 8 {
+        emit(&[rex(false, 0, 0, result_reg)]);
+    }
+    emit(&[0xC1, modrm(3, 4, result_reg), shift_amount]);
 }
 
 fn emit_copy_imm32(emit: &mut impl FnMut(&[u8]), result: Slot, value: u32) {
@@ -391,7 +656,7 @@ fn emit_branch_i32_lt_u_imm16_rhs(
 }
 
 pub fn compile_trace(trace: &[TraceEntry], fs: &FrameSlots) -> io::Result<JitCode> {
-    std::println!("{:?}", trace);
+    std::println!("{:#?}", trace);
     let buffer = unsafe {
         mmap(
             std::ptr::null_mut(),
@@ -446,6 +711,43 @@ pub fn compile_trace(trace: &[TraceEntry], fs: &FrameSlots) -> io::Result<JitCod
             }
             Op::I64RemU { result, lhs, rhs } => {
                 emit_i64_rem_u(&mut emit, fs, result, lhs, rhs);
+            }
+            Op::I32Add { result, lhs, rhs } => {
+                emit_i32_add(&mut emit, fs, result, lhs, rhs);
+            }
+            Op::I32Sub { result, lhs, rhs } => {
+                emit_i32_sub(&mut emit, fs, result, lhs, rhs);
+            }
+            Op::I32Mul { result, lhs, rhs } => {
+                emit_i32_mul(&mut emit, fs, result, lhs, rhs);
+            }
+            Op::I32DivS { result, lhs, rhs } => {
+                emit_i32_div_s(&mut emit, fs, result, lhs, rhs);
+            }
+            Op::I32DivU { result, lhs, rhs } => {
+                emit_i32_div_u(&mut emit, fs, result, lhs, rhs);
+            }
+            Op::I32RemS { result, lhs, rhs } => {
+                emit_i32_rem_s(&mut emit, fs, result, lhs, rhs);
+            }
+            Op::I32RemU { result, lhs, rhs } => {
+                emit_i32_rem_u(&mut emit, fs, result, lhs, rhs);
+            }
+            Op::I32RemUImm16Rhs { result, lhs, rhs } => {
+                let rhs_nonzero = std::num::NonZeroU32::from(rhs);
+                let rhs_val = rhs_nonzero.get();
+                emit_i32_rem_u_imm16_rhs(&mut emit, fs, result, lhs, rhs_val);
+            }
+            Op::I32BitAnd { result, lhs, rhs } => {
+                emit_i32_bitand(&mut emit, fs, result, lhs, rhs);
+            }
+            Op::I32BitAndImm16 { result, lhs, rhs } => {
+                let rhs_val = i16::try_from(i32::from(rhs)).unwrap();
+                emit_i32_bitand_imm16(&mut emit, fs, result, lhs, rhs_val);
+            }
+            Op::I32ShlBy { result, lhs, rhs } => {
+                let shift_amount = i32::from(rhs) as u8;
+                emit_i32_shl_by(&mut emit, fs, result, lhs, shift_amount);
             }
             Op::I32EqImm16 { result, lhs, rhs } => {
                 let rhs_val = i16::try_from(i32::from(rhs)).unwrap();
@@ -545,6 +847,16 @@ pub fn compile_trace(trace: &[TraceEntry], fs: &FrameSlots) -> io::Result<JitCod
 
     let func: JitFn = unsafe { std::mem::transmute(start) };
 
+    print_code(offset.clone(), start);
+
+    Ok(JitCode {
+        func,
+        buffer: start,
+        code_size: offset.get(),
+    })
+}
+
+fn print_code(offset: Cell<usize>, start: *mut u8) {
     std::println!("Generated machine code ({} bytes):", offset.get());
     let code_slice = unsafe { std::slice::from_raw_parts(start, offset.get()) };
     for (i, chunk) in code_slice.chunks(16).enumerate() {
@@ -561,36 +873,30 @@ pub fn compile_trace(trace: &[TraceEntry], fs: &FrameSlots) -> io::Result<JitCod
         .mode(capstone::arch::x86::ArchMode::Mode64)
         .build()
     {
-        Ok(cs) => {
-            match cs.disasm_all(code_slice, start as u64) {
-                Ok(insns) => {
-                    for insn in insns.iter() {
-                        let bytes_str = insn.bytes().iter()
-                            .map(|b| std::format!("{:02x}", b))
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        let asm_str = std::format!(
-                            "{} {}",
-                            insn.mnemonic().unwrap_or(""),
-                            insn.op_str().unwrap_or("")
-                        );
-                        std::println!(
-                            "{:04x}: {:30} {}",
-                            insn.address() - start as u64,
-                            bytes_str,
-                            asm_str
-                        );
-                    }
+        Ok(cs) => match cs.disasm_all(code_slice, start as u64) {
+            Ok(insns) => {
+                for insn in insns.iter() {
+                    let bytes_str = insn
+                        .bytes()
+                        .iter()
+                        .map(|b| std::format!("{:02x}", b))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let asm_str = std::format!(
+                        "{} {}",
+                        insn.mnemonic().unwrap_or(""),
+                        insn.op_str().unwrap_or("")
+                    );
+                    std::println!(
+                        "{:04x}: {:30} {}",
+                        insn.address() - start as u64,
+                        bytes_str,
+                        asm_str
+                    );
                 }
-                Err(e) => std::println!("Disassembly failed: {}", e),
             }
-        }
+            Err(e) => std::println!("Disassembly failed: {}", e),
+        },
         Err(e) => std::println!("Capstone init failed: {}", e),
     }
-
-    Ok(JitCode {
-        func,
-        buffer: start,
-        code_size: offset.get(),
-    })
 }

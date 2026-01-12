@@ -4,106 +4,124 @@
 cargo run -p wasmi_cli --release -- --help
 ```
 
+スロットの値を見る
+```rust
+std::println!("slot(2): {:?}", unsafe { u64::from(self.sp.get(Slot::from(2))) });
+std::println!("slot(3): {:?}", unsafe { u64::from(self.sp.get(Slot::from(3))) });
+std::println!("slot(4): {:?}", unsafe { u64::from(self.sp.get(Slot::from(4))) });
+```
+
+- レジスタを有効活用できるようにする
+  - スロット番号とレジスタのマップ
+
+メモリ操作について
+線形メモリのポインタが無効になる可能性がある命令はJIT対象外とする
+- Op::MemoryGrow
+- Op::Call / CallIndirect：関数呼び出し（ホスト関数がgrowする可能性）
+- Op::Return：インスタンス切り替えの可能性
+
+memory.wasm
 [
     TraceEntry {
-        op: I64Add {
+        op: I32BitAnd {
             result: Slot(
-                6,
+                5,
             ),
             lhs: Slot(
                 2,
             ),
             rhs: Slot(
-                3,
+                -3,
             ),
         },
         ip: InstructionPtr {
-            ptr: 0x000055d76be5eab0,
+            ptr: 0x0000555a42f5c438,
         },
     },
     TraceEntry {
-        op: I64RemU {
-            result: Slot(
-                4,
-            ),
-            lhs: Slot(
-                6,
-            ),
-            rhs: Slot(
-                -1,
-            ),
-        },
-        ip: InstructionPtr {
-            ptr: 0x000055d76be5eab8,
-        },
-    },
-    TraceEntry {
-        op: I32EqImm16 {
+        op: I32RemUImm16Rhs {
             result: Slot(
                 5,
+            ),
+            lhs: Slot(
+                5,
+            ),
+            rhs: Const16 {
+                inner: AnyConst16 {
+                    bits: 3,
+                },
+                marker: PhantomData<fn() -> core::num::nonzero::NonZero<u32>>,
+            },
+        },
+        ip: InstructionPtr {
+            ptr: 0x0000555a42f5c440,
+        },
+    },
+    TraceEntry {
+        op: I32ShlBy {
+            result: Slot(
+                5,
+            ),
+            lhs: Slot(
+                5,
+            ),
+            rhs: ShiftAmount {
+                value: Const16 {
+                    inner: AnyConst16 {
+                        bits: 2,
+                    },
+                    marker: PhantomData<fn() -> i32>,
+                },
+            },
+        },
+        ip: InstructionPtr {
+            ptr: 0x0000555a42f5c448,
+        },
+    },
+    TraceEntry {
+        op: I32Add {
+            result: Slot(
+                3,
             ),
             lhs: Slot(
                 1,
             ),
-            rhs: Const16 {
-                inner: AnyConst16 {
-                    bits: 1000,
-                },
-                marker: PhantomData<fn() -> i32>,
-            },
-        },
-        ip: InstructionPtr {
-            ptr: 0x000055d76be5eac0,
-        },
-    },
-    TraceEntry {
-        op: BranchI32NeImm16 {
-            lhs: Slot(
+            rhs: Slot(
                 5,
             ),
-            rhs: Const16 {
-                inner: AnyConst16 {
-                    bits: 0,
-                },
-                marker: PhantomData<fn() -> i32>,
-            },
-            offset: BranchOffset16(
-                7,
-            ),
         },
         ip: InstructionPtr {
-            ptr: 0x000055d76be5eac8,
+            ptr: 0x0000555a42f5c450,
         },
     },
     TraceEntry {
-        op: Copy2 {
-            results: FixedSlotSpan {
-                span: SlotSpan(
-                    Slot(
-                        2,
-                    ),
-                ),
-            },
-            values: [
-                Slot(
-                    4,
-                ),
-                Slot(
-                    2,
-                ),
-            ],
+        op: Load32Offset16 {
+            result: Slot(
+                5,
+            ),
+            ptr: Slot(
+                3,
+            ),
+            offset: Offset16(
+                Const16 {
+                    inner: AnyConst16 {
+                        bits: 0,
+                    },
+                    marker: PhantomData<fn() -> u64>,
+                },
+            ),
         },
         ip: InstructionPtr {
-            ptr: 0x000055d76be5ead0,
+            ptr: 0x0000555a42f5c458,
         },
     },
     TraceEntry {
         op: I32AddImm16 {
             result: Slot(
-                7,
+                5,
             ),
             lhs: Slot(
-                1,
+                5,
             ),
             rhs: Const16 {
                 inner: AnyConst16 {
@@ -113,60 +131,558 @@ cargo run -p wasmi_cli --release -- --help
             },
         },
         ip: InstructionPtr {
-            ptr: 0x000055d76be5ead8,
+            ptr: 0x0000555a42f5c460,
         },
     },
     TraceEntry {
-        op: CopyImm32 {
-            result: Slot(
-                6,
+        op: Store32Offset16 {
+            ptr: Slot(
+                3,
             ),
-            value: AnyConst32 {
-                bits: 1000,
+            offset: Offset16(
+                Const16 {
+                    inner: AnyConst16 {
+                        bits: 0,
+                    },
+                    marker: PhantomData<fn() -> u64>,
+                },
+            ),
+            value: Slot(
+                5,
+            ),
+        },
+        ip: InstructionPtr {
+            ptr: 0x0000555a42f5c468,
+        },
+    },
+    TraceEntry {
+        op: BranchI32NeImm16 {
+            lhs: Slot(
+                2,
+            ),
+            rhs: Const16 {
+                inner: AnyConst16 {
+                    bits: 3332,
+                },
+                marker: PhantomData<fn() -> i32>,
+            },
+            offset: BranchOffset16(
+                21,
+            ),
+        },
+        ip: InstructionPtr {
+            ptr: 0x0000555a42f5c470,
+        },
+    },
+    TraceEntry {
+        op: I32BitOrImm16 {
+            result: Slot(
+                5,
+            ),
+            lhs: Slot(
+                2,
+            ),
+            rhs: Const16 {
+                inner: AnyConst16 {
+                    bits: 1,
+                },
+                marker: PhantomData<fn() -> i32>,
             },
         },
         ip: InstructionPtr {
-            ptr: 0x000055d76be5eae0,
+            ptr: 0x0000555a42f5c518,
         },
     },
     TraceEntry {
-        op: SelectI32EqImm16 {
+        op: I32BitAnd {
             result: Slot(
-                1,
+                5,
+            ),
+            lhs: Slot(
+                5,
+            ),
+            rhs: Slot(
+                -3,
+            ),
+        },
+        ip: InstructionPtr {
+            ptr: 0x0000555a42f5c520,
+        },
+    },
+    TraceEntry {
+        op: I32RemUImm16Rhs {
+            result: Slot(
+                5,
             ),
             lhs: Slot(
                 5,
             ),
             rhs: Const16 {
                 inner: AnyConst16 {
-                    bits: 0,
+                    bits: 3,
+                },
+                marker: PhantomData<fn() -> core::num::nonzero::NonZero<u32>>,
+            },
+        },
+        ip: InstructionPtr {
+            ptr: 0x0000555a42f5c528,
+        },
+    },
+    TraceEntry {
+        op: I32ShlBy {
+            result: Slot(
+                5,
+            ),
+            lhs: Slot(
+                5,
+            ),
+            rhs: ShiftAmount {
+                value: Const16 {
+                    inner: AnyConst16 {
+                        bits: 2,
+                    },
+                    marker: PhantomData<fn() -> i32>,
+                },
+            },
+        },
+        ip: InstructionPtr {
+            ptr: 0x0000555a42f5c530,
+        },
+    },
+    TraceEntry {
+        op: I32Add {
+            result: Slot(
+                3,
+            ),
+            lhs: Slot(
+                1,
+            ),
+            rhs: Slot(
+                5,
+            ),
+        },
+        ip: InstructionPtr {
+            ptr: 0x0000555a42f5c538,
+        },
+    },
+    TraceEntry {
+        op: Load32Offset16 {
+            result: Slot(
+                5,
+            ),
+            ptr: Slot(
+                3,
+            ),
+            offset: Offset16(
+                Const16 {
+                    inner: AnyConst16 {
+                        bits: 0,
+                    },
+                    marker: PhantomData<fn() -> u64>,
+                },
+            ),
+        },
+        ip: InstructionPtr {
+            ptr: 0x0000555a42f5c540,
+        },
+    },
+    TraceEntry {
+        op: I32AddImm16 {
+            result: Slot(
+                5,
+            ),
+            lhs: Slot(
+                5,
+            ),
+            rhs: Const16 {
+                inner: AnyConst16 {
+                    bits: 1,
                 },
                 marker: PhantomData<fn() -> i32>,
             },
         },
         ip: InstructionPtr {
-            ptr: 0x000055d76be5eae8,
+            ptr: 0x0000555a42f5c548,
         },
     },
     TraceEntry {
-        op: BranchI32LtUImm16Rhs {
-            lhs: Slot(
-                1,
+        op: Store32Offset16 {
+            ptr: Slot(
+                3,
             ),
-            rhs: Const16 {
-                inner: AnyConst16 {
-                    bits: 1001,
+            offset: Offset16(
+                Const16 {
+                    inner: AnyConst16 {
+                        bits: 0,
+                    },
+                    marker: PhantomData<fn() -> u64>,
                 },
-                marker: PhantomData<fn() -> u32>,
-            },
-            offset: BranchOffset16(
-                -9,
+            ),
+            value: Slot(
+                5,
             ),
         },
         ip: InstructionPtr {
-            ptr: 0x000055d76be5eaf8,
+            ptr: 0x0000555a42f5c550,
         },
     },
+    TraceEntry {
+        op: I32AddImm16 {
+            result: Slot(
+                2,
+            ),
+            lhs: Slot(
+                2,
+            ),
+            rhs: Const16 {
+                inner: AnyConst16 {
+                    bits: 2,
+                },
+                marker: PhantomData<fn() -> i32>,
+            },
+        },
+        ip: InstructionPtr {
+            ptr: 0x0000555a42f5c558,
+        },
+    },
+    TraceEntry {
+        op: Branch {
+            offset: BranchOffset(
+                -37,
+            ),
+        },
+        ip: InstructionPtr {
+            ptr: 0x0000555a42f5c560,
+        },
+    },
+]
+
+
+
+hello-world.bf.wasm
+
+[
+  TraceEntry {
+      op: I32Load8s {
+          result: Slot(
+              7,
+          ),
+          offset_lo: Offset64Lo(
+              1049816,
+          ),
+      },
+      ip: InstructionPtr {
+          ptr: 0x0000564245152ae8,
+      },
+  },
+  TraceEntry {
+      op: BranchI32LeSImm16Rhs {
+          lhs: Slot(
+              7,
+          ),
+          rhs: Const16 {
+              inner: AnyConst16 {
+                  bits: 65535,
+              },
+              marker: PhantomData<fn() -> i32>,
+          },
+          offset: BranchOffset16(
+              4,
+          ),
+      },
+      ip: InstructionPtr {
+          ptr: 0x0000564245152af8,
+      },
+  },
+  TraceEntry {
+      op: I32AddImm16 {
+          result: Slot(
+              6,
+          ),
+          lhs: Slot(
+              6,
+          ),
+          rhs: Const16 {
+              inner: AnyConst16 {
+                  bits: 1,
+              },
+              marker: PhantomData<fn() -> i32>,
+          },
+      },
+      ip: InstructionPtr {
+          ptr: 0x0000564245152b00,
+      },
+  },
+  TraceEntry {
+      op: I32BitAndImm16 {
+          result: Slot(
+              7,
+          ),
+          lhs: Slot(
+              7,
+          ),
+          rhs: Const16 {
+              inner: AnyConst16 {
+                  bits: 255,
+              },
+              marker: PhantomData<fn() -> i32>,
+          },
+      },
+      ip: InstructionPtr {
+          ptr: 0x0000564245152b08,
+      },
+  },
+  TraceEntry {
+      op: Branch {
+          offset: BranchOffset(
+              29,
+          ),
+      },
+      ip: InstructionPtr {
+          ptr: 0x0000564245152b10,
+      },
+  },
+  TraceEntry {
+      op: I32AddImm16 {
+          result: Slot(
+              11,
+          ),
+          lhs: Slot(
+              7,
+          ),
+          rhs: Const16 {
+              inner: AnyConst16 {
+                  bits: 65493,
+              },
+              marker: PhantomData<fn() -> i32>,
+          },
+      },
+      ip: InstructionPtr {
+          ptr: 0x0000564245152bf8,
+      },
+  },
+  TraceEntry {
+      op: BranchTable0 {
+          index: Slot(
+              11,
+          ),
+          len_targets: 52,
+      },
+      ip: InstructionPtr {
+          ptr: 0x0000564245152c00,
+      },
+  },
+  TraceEntry {
+      op: Branch {
+          offset: BranchOffset(
+              35,
+          ),
+      },
+      ip: InstructionPtr {
+          ptr: 0x0000564245152ca0,
+      },
+  },
+  TraceEntry {
+      op: Load32Offset16 {
+          result: Slot(
+              12,
+          ),
+          ptr: Slot(
+              0,
+          ),
+          offset: Offset16(
+              Const16 {
+                  inner: AnyConst16 {
+                      bits: 4,
+                  },
+                  marker: PhantomData<fn() -> u64>,
+              },
+          ),
+      },
+      ip: InstructionPtr {
+          ptr: 0x0000564245152db8,
+      },
+  },
+  TraceEntry {
+      op: BranchI32Ne {
+          lhs: Slot(
+              4,
+          ),
+          rhs: Slot(
+              12,
+          ),
+          offset: BranchOffset16(
+              4,
+          ),
+      },
+      ip: InstructionPtr {
+          ptr: 0x0000564245152dc0,
+      },
+  },
+  TraceEntry {
+      op: Load32Offset16 {
+          result: Slot(
+              1,
+          ),
+          ptr: Slot(
+              0,
+          ),
+          offset: Offset16(
+              Const16 {
+                  inner: AnyConst16 {
+                      bits: 8,
+                  },
+                  marker: PhantomData<fn() -> u64>,
+              },
+          ),
+      },
+      ip: InstructionPtr {
+          ptr: 0x0000564245152de0,
+      },
+  },
+  TraceEntry {
+      op: I32ShlBy {
+          result: Slot(
+              12,
+          ),
+          lhs: Slot(
+              4,
+          ),
+          rhs: ShiftAmount {
+              value: Const16 {
+                  inner: AnyConst16 {
+                      bits: 3,
+                  },
+                  marker: PhantomData<fn() -> i32>,
+              },
+          },
+      },
+      ip: InstructionPtr {
+          ptr: 0x0000564245152de8,
+      },
+  },
+  TraceEntry {
+      op: I32Add {
+          result: Slot(
+              11,
+          ),
+          lhs: Slot(
+              1,
+          ),
+          rhs: Slot(
+              12,
+          ),
+      },
+      ip: InstructionPtr {
+          ptr: 0x0000564245152df0,
+      },
+  },
+  TraceEntry {
+      op: I32StoreOffset16Imm16 {
+          ptr: Slot(
+              11,
+          ),
+          offset: Offset16(
+              Const16 {
+                  inner: AnyConst16 {
+                      bits: 0,
+                  },
+                  marker: PhantomData<fn() -> u64>,
+              },
+          ),
+          value: Const16 {
+              inner: AnyConst16 {
+                  bits: 0,
+              },
+              marker: PhantomData<fn() -> i32>,
+          },
+      },
+      ip: InstructionPtr {
+          ptr: 0x0000564245152df8,
+      },
+  },
+  TraceEntry {
+      op: I32AddImm16 {
+          result: Slot(
+              4,
+          ),
+          lhs: Slot(
+              4,
+          ),
+          rhs: Const16 {
+              inner: AnyConst16 {
+                  bits: 1,
+              },
+              marker: PhantomData<fn() -> i32>,
+          },
+      },
+      ip: InstructionPtr {
+          ptr: 0x0000564245152e00,
+      },
+  },
+  TraceEntry {
+      op: Branch {
+          offset: BranchOffset(
+              109,
+          ),
+      },
+      ip: InstructionPtr {
+          ptr: 0x0000564245152e08,
+      },
+  },
+  TraceEntry {
+      op: Store32Offset16 {
+          ptr: Slot(
+              0,
+          ),
+          offset: Offset16(
+              Const16 {
+                  inner: AnyConst16 {
+                      bits: 12,
+                  },
+                  marker: PhantomData<fn() -> u64>,
+              },
+          ),
+          value: Slot(
+              4,
+          ),
+      },
+      ip: InstructionPtr {
+          ptr: 0x0000564245153170,
+      },
+  },
+  TraceEntry {
+      op: Copy {
+          result: Slot(
+              3,
+          ),
+          value: Slot(
+              1,
+          ),
+      },
+      ip: InstructionPtr {
+          ptr: 0x0000564245153178,
+      },
+  },
+  TraceEntry {
+      op: BranchI32NeImm16 {
+          lhs: Slot(
+              6,
+          ),
+          rhs: Const16 {
+              inner: AnyConst16 {
+                  bits: 107,
+              },
+              marker: PhantomData<fn() -> i32>,
+          },
+          offset: BranchOffset16(
+              -211,
+          ),
+      },
+      ip: InstructionPtr {
+          ptr: 0x0000564245153180,
+      },
+  },
 ]
 
 
