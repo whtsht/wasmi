@@ -144,7 +144,8 @@ impl<'engine> Executor<'engine> {
         let code = gen_code::compile_trace(trace, &self.sp).unwrap();
 
         unsafe {
-            let ptr = (code.func)(self.sp.as_ptr() as *mut u64);
+            let memory_ptr = self.cache.memory.data_mut().as_mut_ptr();
+            let ptr = (code.func)(self.sp.as_ptr() as *mut u64, memory_ptr);
             InstructionPtr::new(ptr as *const Op)
         }
     }

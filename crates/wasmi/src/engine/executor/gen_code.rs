@@ -8,8 +8,8 @@ use libc::{mmap, mprotect, munmap, MAP_ANONYMOUS, MAP_PRIVATE, PROT_EXEC, PROT_R
 use std::borrow::ToOwned;
 use std::{cell::Cell, io, vec::Vec};
 
-// fn(*slots) -> InstructionPtr
-pub type JitFn = unsafe extern "C" fn(*mut u64) -> usize;
+// fn(*slots, *memory) -> InstructionPtr
+pub type JitFn = unsafe extern "C" fn(*mut u64, *mut u8) -> usize;
 
 pub struct JitCode {
     pub func: JitFn,
@@ -159,14 +159,77 @@ fn emit_movzx_r64_r8(emit: &mut impl FnMut(&[u8]), dst: u8, src: u8) {
     emit(&[rex_byte, 0x0F, 0xB6, modrm(3, dst, src)]);
 }
 
+/// SIB byte encoding
+fn sib(scale: u8, index: u8, base: u8) -> u8 {
+    ((scale & 0x3) << 6) | ((index & 0x7) << 3) | (base & 0x7)
+}
+
+/// MOV dst(32bit), [base + index + disp]
+fn emit_mov_r32_from_memory_sib(
+    emit: &mut impl FnMut(&[u8]),
+    dst: u8,
+    base: u8,
+    index: u8,
+    disp: i32,
+) {
+    // REXプレフィックス
+    if dst >= 8 || base >= 8 || index >= 8 {
+        let rex_byte = rex(false, dst, index, base);
+        emit(&[rex_byte]);
+    }
+
+    if disp == 0 && (base & 7) != 5 && (index & 7) != 5 {
+        // disp0, ModR/M + SIB
+        emit(&[0x8B, modrm(0, dst, 4), sib(0, index, base)]);
+    } else if disp >= -128 && disp <= 127 {
+        // disp8, ModR/M + SIB + disp8
+        emit(&[0x8B, modrm(1, dst, 4), sib(0, index, base), disp as u8]);
+    } else {
+        // disp32, ModR/M + SIB + disp32
+        emit(&[0x8B, modrm(2, dst, 4), sib(0, index, base)]);
+        emit(&(disp as u32).to_le_bytes());
+    }
+}
+
+/// MOV [base + index + disp], src(32bit)
+fn emit_mov_r32_to_memory_sib(
+    emit: &mut impl FnMut(&[u8]),
+    base: u8,
+    index: u8,
+    disp: i32,
+    src: u8,
+) {
+    // REXプレフィックス
+    if src >= 8 || base >= 8 || index >= 8 {
+        let rex_byte = rex(false, src, index, base);
+        emit(&[rex_byte]);
+    }
+
+    if disp == 0 && (base & 7) != 5 && (index & 7) != 5 {
+        // disp0, ModR/M + SIB
+        emit(&[0x89, modrm(0, src, 4), sib(0, index, base)]);
+    } else if disp >= -128 && disp <= 127 {
+        // disp8, ModR/M + SIB + disp8
+        emit(&[0x89, modrm(1, src, 4), sib(0, index, base), disp as u8]);
+    } else {
+        // disp32, ModR/M + SIB + disp32
+        emit(&[0x89, modrm(2, src, 4), sib(0, index, base)]);
+        emit(&(disp as u32).to_le_bytes());
+    }
+}
+
 fn emit_prologue(emit: &mut impl FnMut(&[u8])) {
     // callee-savedレジスタを退避
     emit(&[0x53]); // PUSH RBX
     emit(&[0x41, 0x54]); // PUSH R12
     emit(&[0x41, 0x55]); // PUSH R13
     emit(&[0x41, 0x56]); // PUSH R14
+    emit(&[0x41, 0x57]); // PUSH R15
 
-    // 8つのスロットをRDIからレジスタにロード
+    // メモリポインタ（第2引数RSI）をR15に保存
+    emit_mov_r64_r64(emit, 15, 6); // MOV R15, RSI
+
+    // 8つのスロットをRDI（第1引数）からレジスタにロード
     let registers = [3, 1, 6, 8, 9, 10, 11, 14]; // RBX, RCX, RSI, R8-R11, R14
     for (i, &reg) in registers.iter().enumerate() {
         emit_mov_from_memory(emit, reg, 7 /*RDI*/, (i * 8) as i32);
@@ -182,6 +245,7 @@ fn emit_epilogue(emit: &mut impl FnMut(&[u8]), next_ip: *const Op) {
     emit_mov_imm64(emit, 0 /*RAX*/, next_ip as usize as u64);
 
     // callee-savedレジスタを復元（PUSH の逆順）
+    emit(&[0x41, 0x5F]); // POP R15
     emit(&[0x41, 0x5E]); // POP R14
     emit(&[0x41, 0x5D]); // POP R13
     emit(&[0x41, 0x5C]); // POP R12
@@ -546,6 +610,36 @@ fn emit_i32_shl_by(
     emit(&[0xC1, modrm(3, 4, result_reg), shift_amount]);
 }
 
+fn emit_load32_offset16(
+    emit: &mut impl FnMut(&[u8]),
+    fs: &FrameSlots,
+    result: Slot,
+    ptr: Slot,
+    offset: u16,
+) {
+    let result_reg = slot_to_register(result).unwrap();
+    let ptr_reg = get_operand_reg(emit, fs, ptr, 12);
+
+    // MOV result_reg(32bit), [R15 + ptr_reg + offset]
+    // R15 = memory base pointer
+    emit_mov_r32_from_memory_sib(emit, result_reg, 15, ptr_reg, offset as i32);
+}
+
+fn emit_store32_offset16(
+    emit: &mut impl FnMut(&[u8]),
+    fs: &FrameSlots,
+    ptr: Slot,
+    offset: u16,
+    value: Slot,
+) {
+    let ptr_reg = get_operand_reg(emit, fs, ptr, 12);
+    let value_reg = get_operand_reg(emit, fs, value, 13);
+
+    // MOV [R15 + ptr_reg + offset], value_reg(32bit)
+    // R15 = memory base pointer
+    emit_mov_r32_to_memory_sib(emit, 15, ptr_reg, offset as i32, value_reg);
+}
+
 fn emit_copy_imm32(emit: &mut impl FnMut(&[u8]), result: Slot, value: u32) {
     let result_reg = slot_to_register(result).unwrap();
     emit_mov_r32_imm32(emit, result_reg, value);
@@ -748,6 +842,16 @@ pub fn compile_trace(trace: &[TraceEntry], fs: &FrameSlots) -> io::Result<JitCod
             Op::I32ShlBy { result, lhs, rhs } => {
                 let shift_amount = i32::from(rhs) as u8;
                 emit_i32_shl_by(&mut emit, fs, result, lhs, shift_amount);
+            }
+            Op::Load32Offset16 { result, ptr, offset } => {
+                use crate::ir::Offset64;
+                let offset_val = u64::from(Offset64::from(offset)) as u16;
+                emit_load32_offset16(&mut emit, fs, result, ptr, offset_val);
+            }
+            Op::Store32Offset16 { ptr, offset, value } => {
+                use crate::ir::Offset64;
+                let offset_val = u64::from(Offset64::from(offset)) as u16;
+                emit_store32_offset16(&mut emit, fs, ptr, offset_val, value);
             }
             Op::I32EqImm16 { result, lhs, rhs } => {
                 let rhs_val = i16::try_from(i32::from(rhs)).unwrap();
