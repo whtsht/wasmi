@@ -126,6 +126,24 @@ fn emit_and_r32_r32(emit: &mut impl FnMut(&[u8]), dst: u8, src: u8) {
     emit(&[0x21, modrm(3, src, dst)]);
 }
 
+/// OR dst(32bit), src(32bit)
+fn emit_or_r32_r32(emit: &mut impl FnMut(&[u8]), dst: u8, src: u8) {
+    if dst >= 8 || src >= 8 {
+        let rex_byte = rex(false, src, 0, dst);
+        emit(&[rex_byte]);
+    }
+    emit(&[0x09, modrm(3, src, dst)]);
+}
+
+/// XOR dst(32bit), src(32bit)
+fn emit_xor_r32_r32(emit: &mut impl FnMut(&[u8]), dst: u8, src: u8) {
+    if dst >= 8 || src >= 8 {
+        let rex_byte = rex(false, src, 0, dst);
+        emit(&[rex_byte]);
+    }
+    emit(&[0x31, modrm(3, src, dst)]);
+}
+
 /// CMP reg(32bit), imm
 fn emit_cmp_r32_imm(emit: &mut impl FnMut(&[u8]), reg: u8, imm: i16) {
     if reg >= 8 {
@@ -458,6 +476,32 @@ fn emit_i32_bitand(
     emit_and_r32_r32(emit, result_reg, rhs_reg);
 }
 
+fn emit_i32_bitor(
+    emit: &mut impl FnMut(&[u8]),
+    fs: &FrameSlots,
+    result: Slot,
+    lhs: Slot,
+    rhs: Slot,
+) {
+    let (result_reg, _, rhs_reg) = prepare_binary_operands(emit, fs, result, lhs, rhs);
+
+    // OR result, rhs (32bit)
+    emit_or_r32_r32(emit, result_reg, rhs_reg);
+}
+
+fn emit_i32_bitxor(
+    emit: &mut impl FnMut(&[u8]),
+    fs: &FrameSlots,
+    result: Slot,
+    lhs: Slot,
+    rhs: Slot,
+) {
+    let (result_reg, _, rhs_reg) = prepare_binary_operands(emit, fs, result, lhs, rhs);
+
+    // XOR result, rhs (32bit)
+    emit_xor_r32_r32(emit, result_reg, rhs_reg);
+}
+
 // TODO: ゼロ除算チェック
 fn emit_i64_rem_u(
     emit: &mut impl FnMut(&[u8]),
@@ -585,6 +629,66 @@ fn emit_i32_bitand_imm16(
             emit(&[rex(false, 0, 0, result_reg)]);
         }
         emit(&[0x81, modrm(3, 4, result_reg)]);
+        emit(&(rhs as i32).to_le_bytes());
+    }
+}
+
+fn emit_i32_bitor_imm16(
+    emit: &mut impl FnMut(&[u8]),
+    fs: &FrameSlots,
+    result: Slot,
+    lhs: Slot,
+    rhs: i16,
+) {
+    let result_reg = slot_to_register(result).unwrap();
+    let lhs_reg = get_operand_reg(emit, fs, lhs, 12);
+
+    if result_reg != lhs_reg {
+        emit_mov_r64_r64(emit, result_reg, lhs_reg);
+    }
+
+    if rhs >= -128 && rhs <= 127 {
+        // OR r32, imm8: 0x83 /1 + imm8
+        if result_reg >= 8 {
+            emit(&[rex(false, 0, 0, result_reg)]);
+        }
+        emit(&[0x83, modrm(3, 1, result_reg), rhs as u8]);
+    } else {
+        // OR r32, imm32: 0x81 /1 + imm32
+        if result_reg >= 8 {
+            emit(&[rex(false, 0, 0, result_reg)]);
+        }
+        emit(&[0x81, modrm(3, 1, result_reg)]);
+        emit(&(rhs as i32).to_le_bytes());
+    }
+}
+
+fn emit_i32_bitxor_imm16(
+    emit: &mut impl FnMut(&[u8]),
+    fs: &FrameSlots,
+    result: Slot,
+    lhs: Slot,
+    rhs: i16,
+) {
+    let result_reg = slot_to_register(result).unwrap();
+    let lhs_reg = get_operand_reg(emit, fs, lhs, 12);
+
+    if result_reg != lhs_reg {
+        emit_mov_r64_r64(emit, result_reg, lhs_reg);
+    }
+
+    if rhs >= -128 && rhs <= 127 {
+        // XOR r32, imm8: 0x83 /6 + imm8
+        if result_reg >= 8 {
+            emit(&[rex(false, 0, 0, result_reg)]);
+        }
+        emit(&[0x83, modrm(3, 6, result_reg), rhs as u8]);
+    } else {
+        // XOR r32, imm32: 0x81 /6 + imm32
+        if result_reg >= 8 {
+            emit(&[rex(false, 0, 0, result_reg)]);
+        }
+        emit(&[0x81, modrm(3, 6, result_reg)]);
         emit(&(rhs as i32).to_le_bytes());
     }
 }
@@ -839,11 +943,29 @@ pub fn compile_trace(trace: &[TraceEntry], fs: &FrameSlots) -> io::Result<JitCod
                 let rhs_val = i16::try_from(i32::from(rhs)).unwrap();
                 emit_i32_bitand_imm16(&mut emit, fs, result, lhs, rhs_val);
             }
+            Op::I32BitOr { result, lhs, rhs } => {
+                emit_i32_bitor(&mut emit, fs, result, lhs, rhs);
+            }
+            Op::I32BitOrImm16 { result, lhs, rhs } => {
+                let rhs_val = i16::try_from(i32::from(rhs)).unwrap();
+                emit_i32_bitor_imm16(&mut emit, fs, result, lhs, rhs_val);
+            }
+            Op::I32BitXor { result, lhs, rhs } => {
+                emit_i32_bitxor(&mut emit, fs, result, lhs, rhs);
+            }
+            Op::I32BitXorImm16 { result, lhs, rhs } => {
+                let rhs_val = i16::try_from(i32::from(rhs)).unwrap();
+                emit_i32_bitxor_imm16(&mut emit, fs, result, lhs, rhs_val);
+            }
             Op::I32ShlBy { result, lhs, rhs } => {
                 let shift_amount = i32::from(rhs) as u8;
                 emit_i32_shl_by(&mut emit, fs, result, lhs, shift_amount);
             }
-            Op::Load32Offset16 { result, ptr, offset } => {
+            Op::Load32Offset16 {
+                result,
+                ptr,
+                offset,
+            } => {
                 use crate::ir::Offset64;
                 let offset_val = u64::from(Offset64::from(offset)) as u16;
                 emit_load32_offset16(&mut emit, fs, result, ptr, offset_val);
