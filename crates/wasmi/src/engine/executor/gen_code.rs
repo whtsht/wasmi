@@ -733,7 +733,8 @@ fn emit_branch_i32_ne_imm16(
     rhs: i16,
     offset: &Cell<usize>,
     taken: bool,
-    epilogue_jmp_offsets: &mut Vec<usize>,
+    guard_exits: &mut Vec<(usize, *const Op)>,
+    current_ip: *const Op,
     is_last: bool,
     loop_start_offset: usize,
 ) {
@@ -747,10 +748,19 @@ fn emit_branch_i32_ne_imm16(
         // トレース: lhs == rhs でジャンプしなかった → ガード: lhs != rhs ならエピローグへ
         emit(&[0x0F, 0x85]); // JNE rel32
     }
-    epilogue_jmp_offsets.push(offset.get());
+    guard_exits.push((offset.get(), current_ip));
     emit(&[0, 0, 0, 0]);
 
-    // トレースの最後の命令ならループバック
+    if is_last {
+        let current_pos = offset.get();
+        let next_instr_pos = current_pos + 5; // sizeof(JMP rel32)
+        let relative_offset = (loop_start_offset as i32) - (next_instr_pos as i32);
+        emit(&[0xE9]); // JMP rel32
+        emit(&relative_offset.to_le_bytes());
+    }
+}
+
+fn emit_branch(emit: &mut impl FnMut(&[u8]), offset: &Cell<usize>, is_last: bool, loop_start_offset: usize) {
     if is_last {
         let current_pos = offset.get();
         let next_instr_pos = current_pos + 5; // sizeof(JMP rel32)
@@ -767,7 +777,8 @@ fn emit_branch_i32_lt_u_imm16_rhs(
     rhs: i16,
     offset: &Cell<usize>,
     taken: bool,
-    epilogue_jmp_offsets: &mut Vec<usize>,
+    guard_exits: &mut Vec<(usize, *const Op)>,
+    current_ip: *const Op,
     is_last: bool,
     loop_start_offset: usize,
 ) {
@@ -781,10 +792,9 @@ fn emit_branch_i32_lt_u_imm16_rhs(
         // トレース記録時: lhs >= rhs でジャンプしなかった → lhs < rhs ならJIT終了
         emit(&[0x0F, 0x82]); // JB rel32
     }
-    epilogue_jmp_offsets.push(offset.get());
+    guard_exits.push((offset.get(), current_ip));
     emit(&[0, 0, 0, 0]);
 
-    // トレースの最後の命令ならループバック
     if is_last {
         let current_pos = offset.get();
         let next_instr_pos = current_pos + 5; // sizeof(JMP rel32)
@@ -838,7 +848,7 @@ pub fn compile_trace(trace: &[TraceEntry], fs: &FrameSlots) -> io::Result<JitCod
     emit_prologue(&mut emit);
 
     let loop_start_offset = offset.get();
-    let mut epilogue_jmp_offsets = Vec::new();
+    let mut guard_exits: Vec<(usize, *const Op)> = Vec::new();
 
     let mut i = 0;
     while i < trace.len() {
@@ -935,7 +945,8 @@ pub fn compile_trace(trace: &[TraceEntry], fs: &FrameSlots) -> io::Result<JitCod
                     rhs_val,
                     &offset,
                     taken,
-                    &mut epilogue_jmp_offsets,
+                    &mut guard_exits,
+                    entry.ip.ptr,
                     is_last,
                     loop_start_offset,
                 );
@@ -980,10 +991,15 @@ pub fn compile_trace(trace: &[TraceEntry], fs: &FrameSlots) -> io::Result<JitCod
                     rhs_val,
                     &offset,
                     taken,
-                    &mut epilogue_jmp_offsets,
+                    &mut guard_exits,
+                    entry.ip.ptr,
                     is_last,
                     loop_start_offset,
                 );
+            }
+            Op::Branch { .. } => {
+                let is_last = i == trace.len() - 1;
+                emit_branch(&mut emit, &offset, is_last, loop_start_offset);
             }
             _ => panic!("Unsupported instruction in trace: {:?}", entry.op),
         }
@@ -991,11 +1007,11 @@ pub fn compile_trace(trace: &[TraceEntry], fs: &FrameSlots) -> io::Result<JitCod
         i += 1;
     }
 
-    let epilogue_start = offset.get();
-    let next_ip = trace.last().map(|e| e.ip.ptr).unwrap_or(std::ptr::null());
-    emit_epilogue(&mut emit, next_ip);
+    for (jmp_offset, next_ip) in guard_exits {
+        let epilogue_start = offset.get();
 
-    for jmp_offset in epilogue_jmp_offsets {
+        emit_epilogue(&mut emit, next_ip);
+
         let rel32_pos = jmp_offset;
         let next_instr_pos = rel32_pos + 4;
         let relative_offset = (epilogue_start as i32) - (next_instr_pos as i32);
