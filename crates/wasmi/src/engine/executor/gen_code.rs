@@ -146,19 +146,7 @@ fn emit_xor_r32_r32(emit: &mut impl FnMut(&[u8]), dst: u8, src: u8) {
 
 /// CMP reg(32bit), imm
 fn emit_cmp_r32_imm(emit: &mut impl FnMut(&[u8]), reg: u8, imm: i16) {
-    if reg >= 8 {
-        let rex_byte = rex(false, 0, 0, reg);
-        emit(&[rex_byte]);
-    }
-
-    if imm >= -128 && imm <= 127 {
-        // CMP r32, imm8: 0x83 /7 + imm8
-        emit(&[0x83, modrm(3, 7, reg), imm as u8]);
-    } else {
-        // CMP r32, imm32: 0x81 /7 + imm32
-        emit(&[0x81, modrm(3, 7, reg)]);
-        emit(&(imm as i32).to_le_bytes());
-    }
+    emit_i32_alu_imm(emit, reg, imm, 7); // CMP = /7
 }
 
 /// SETE reg(8bit)
@@ -301,6 +289,40 @@ fn prepare_binary_operands(
     }
 
     (result_reg, lhs_reg, rhs_reg)
+}
+
+fn prepare_imm16_operands(
+    emit: &mut impl FnMut(&[u8]),
+    fs: &FrameSlots,
+    result: Slot,
+    lhs: Slot,
+) -> u8 {
+    let result_reg = slot_to_register(result).unwrap();
+    let lhs_reg = get_operand_reg(emit, fs, lhs, 12);
+
+    if result_reg != lhs_reg {
+        emit_mov_r64_r64(emit, result_reg, lhs_reg);
+    }
+
+    result_reg
+}
+
+/// opcode_ext: ModR/Mのreg field (ADD=0, OR=1, AND=4, SUB=5, XOR=6, CMP=7)
+fn emit_i32_alu_imm(emit: &mut impl FnMut(&[u8]), result_reg: u8, rhs: i16, opcode_ext: u8) {
+    if rhs >= -128 && rhs <= 127 {
+        // OP r32, imm8: 0x83 /N + imm8
+        if result_reg >= 8 {
+            emit(&[rex(false, 0, 0, result_reg)]);
+        }
+        emit(&[0x83, modrm(3, opcode_ext, result_reg), rhs as u8]);
+    } else {
+        // OP r32, imm32: 0x81 /N + imm32
+        if result_reg >= 8 {
+            emit(&[rex(false, 0, 0, result_reg)]);
+        }
+        emit(&[0x81, modrm(3, opcode_ext, result_reg)]);
+        emit(&(rhs as i32).to_le_bytes());
+    }
 }
 
 fn emit_i64_add(emit: &mut impl FnMut(&[u8]), fs: &FrameSlots, result: Slot, lhs: Slot, rhs: Slot) {
@@ -580,27 +602,8 @@ fn emit_i32_add_imm16(
     lhs: Slot,
     rhs: i16,
 ) {
-    let result_reg = slot_to_register(result).unwrap();
-    let lhs_reg = get_operand_reg(emit, fs, lhs, 12);
-
-    if result_reg != lhs_reg {
-        emit_mov_r64_r64(emit, result_reg, lhs_reg);
-    }
-
-    if rhs >= -128 && rhs <= 127 {
-        // ADD r32, imm8: 0x83 /0 + imm8
-        if result_reg >= 8 {
-            emit(&[rex(false, 0, 0, result_reg)]);
-        }
-        emit(&[0x83, modrm(3, 0, result_reg), rhs as u8]);
-    } else {
-        // ADD r32, imm32: 0x81 /0 + imm32
-        if result_reg >= 8 {
-            emit(&[rex(false, 0, 0, result_reg)]);
-        }
-        emit(&[0x81, modrm(3, 0, result_reg)]);
-        emit(&(rhs as i32).to_le_bytes());
-    }
+    let result_reg = prepare_imm16_operands(emit, fs, result, lhs);
+    emit_i32_alu_imm(emit, result_reg, rhs, 0); // ADD = /0
 }
 
 fn emit_i32_bitand_imm16(
@@ -610,27 +613,8 @@ fn emit_i32_bitand_imm16(
     lhs: Slot,
     rhs: i16,
 ) {
-    let result_reg = slot_to_register(result).unwrap();
-    let lhs_reg = get_operand_reg(emit, fs, lhs, 12);
-
-    if result_reg != lhs_reg {
-        emit_mov_r64_r64(emit, result_reg, lhs_reg);
-    }
-
-    if rhs >= -128 && rhs <= 127 {
-        // AND r32, imm8: 0x83 /4 + imm8
-        if result_reg >= 8 {
-            emit(&[rex(false, 0, 0, result_reg)]);
-        }
-        emit(&[0x83, modrm(3, 4, result_reg), rhs as u8]);
-    } else {
-        // AND r32, imm32: 0x81 /4 + imm32
-        if result_reg >= 8 {
-            emit(&[rex(false, 0, 0, result_reg)]);
-        }
-        emit(&[0x81, modrm(3, 4, result_reg)]);
-        emit(&(rhs as i32).to_le_bytes());
-    }
+    let result_reg = prepare_imm16_operands(emit, fs, result, lhs);
+    emit_i32_alu_imm(emit, result_reg, rhs, 4); // AND = /4
 }
 
 fn emit_i32_bitor_imm16(
@@ -640,27 +624,8 @@ fn emit_i32_bitor_imm16(
     lhs: Slot,
     rhs: i16,
 ) {
-    let result_reg = slot_to_register(result).unwrap();
-    let lhs_reg = get_operand_reg(emit, fs, lhs, 12);
-
-    if result_reg != lhs_reg {
-        emit_mov_r64_r64(emit, result_reg, lhs_reg);
-    }
-
-    if rhs >= -128 && rhs <= 127 {
-        // OR r32, imm8: 0x83 /1 + imm8
-        if result_reg >= 8 {
-            emit(&[rex(false, 0, 0, result_reg)]);
-        }
-        emit(&[0x83, modrm(3, 1, result_reg), rhs as u8]);
-    } else {
-        // OR r32, imm32: 0x81 /1 + imm32
-        if result_reg >= 8 {
-            emit(&[rex(false, 0, 0, result_reg)]);
-        }
-        emit(&[0x81, modrm(3, 1, result_reg)]);
-        emit(&(rhs as i32).to_le_bytes());
-    }
+    let result_reg = prepare_imm16_operands(emit, fs, result, lhs);
+    emit_i32_alu_imm(emit, result_reg, rhs, 1); // OR = /1
 }
 
 fn emit_i32_bitxor_imm16(
@@ -670,27 +635,8 @@ fn emit_i32_bitxor_imm16(
     lhs: Slot,
     rhs: i16,
 ) {
-    let result_reg = slot_to_register(result).unwrap();
-    let lhs_reg = get_operand_reg(emit, fs, lhs, 12);
-
-    if result_reg != lhs_reg {
-        emit_mov_r64_r64(emit, result_reg, lhs_reg);
-    }
-
-    if rhs >= -128 && rhs <= 127 {
-        // XOR r32, imm8: 0x83 /6 + imm8
-        if result_reg >= 8 {
-            emit(&[rex(false, 0, 0, result_reg)]);
-        }
-        emit(&[0x83, modrm(3, 6, result_reg), rhs as u8]);
-    } else {
-        // XOR r32, imm32: 0x81 /6 + imm32
-        if result_reg >= 8 {
-            emit(&[rex(false, 0, 0, result_reg)]);
-        }
-        emit(&[0x81, modrm(3, 6, result_reg)]);
-        emit(&(rhs as i32).to_le_bytes());
-    }
+    let result_reg = prepare_imm16_operands(emit, fs, result, lhs);
+    emit_i32_alu_imm(emit, result_reg, rhs, 6); // XOR = /6
 }
 
 fn emit_i32_shl_by(
@@ -700,12 +646,7 @@ fn emit_i32_shl_by(
     lhs: Slot,
     shift_amount: u8,
 ) {
-    let result_reg = slot_to_register(result).unwrap();
-    let lhs_reg = get_operand_reg(emit, fs, lhs, 12);
-
-    if result_reg != lhs_reg {
-        emit_mov_r64_r64(emit, result_reg, lhs_reg);
-    }
+    let result_reg = prepare_imm16_operands(emit, fs, result, lhs);
 
     // SHL r32, imm8: 0xC1 /4 + imm8
     if result_reg >= 8 {
