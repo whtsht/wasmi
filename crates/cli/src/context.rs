@@ -47,9 +47,26 @@ impl Context {
                 panic!("error: fuel metering is enabled but encountered: {error}")
             });
         }
+        // Find the index of env::backedge function in imports
+        let mut func_idx = 0u32;
+        let mut backedge_func_idx = None;
+        for import in module.imports() {
+            if matches!(import.ty(), ExternType::Func(_)) {
+                if import.module() == "env" && import.name() == "backedge" {
+                    backedge_func_idx = Some(func_idx);
+                    break;
+                }
+                func_idx += 1;
+            }
+        }
+        store.set_backedge_func_idx(backedge_func_idx);
         let mut linker = <wasmi::Linker<WasiCtx>>::new(&engine);
         wasmi_wasi::add_to_linker(&mut linker, |ctx| ctx)
             .map_err(|error| anyhow!("failed to add WASI definitions to the linker: {error}"))?;
+        // Add backedge function (no-op, just for linking)
+        linker
+            .func_wrap("env", "backedge", |_arg: i32| {})
+            .map_err(|error| anyhow!("failed to add backedge function: {error}"))?;
         let instance = linker
             .instantiate_and_start(&mut store, &module)
             .map_err(|error| anyhow!("failed to instantiate and start the Wasm module: {error}"))?;

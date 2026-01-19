@@ -51,7 +51,8 @@ impl EngineInner {
         Results: CallResults,
     {
         let mut stack = self.stacks.lock().reuse_or_new();
-        let results = EngineExecutor::new(&self.code_map, &mut stack)
+        let backedge_func_idx = ctx.store.get_backedge_func_idx();
+        let results = EngineExecutor::new(&self.code_map, &mut stack, backedge_func_idx)
             .execute_root_func(ctx.store, func, params, results)
             .map_err(|error| match error.into_resumable() {
                 Ok(error) => error.into_error(),
@@ -80,7 +81,8 @@ impl EngineInner {
     {
         let store = ctx.store;
         let mut stack = self.stacks.lock().reuse_or_new();
-        let results = EngineExecutor::new(&self.code_map, &mut stack)
+        let backedge_func_idx = store.get_backedge_func_idx();
+        let results = EngineExecutor::new(&self.code_map, &mut stack, backedge_func_idx)
             .execute_root_func(store, func, params, results);
         match results {
             Ok(results) => {
@@ -136,7 +138,8 @@ impl EngineInner {
         Results: CallResults,
     {
         let caller_results = invocation.caller_results();
-        let mut executor = EngineExecutor::new(&self.code_map, invocation.common.stack_mut());
+        let backedge_func_idx = ctx.store.get_backedge_func_idx();
+        let mut executor = EngineExecutor::new(&self.code_map, invocation.common.stack_mut(), backedge_func_idx);
         let results = executor.resume_func_host_trap(ctx.store, params, caller_results, results);
         match results {
             Ok(results) => {
@@ -179,7 +182,8 @@ impl EngineInner {
     where
         Results: CallResults,
     {
-        let mut executor = EngineExecutor::new(&self.code_map, invocation.common.stack_mut());
+        let backedge_func_idx = ctx.store.get_backedge_func_idx();
+        let mut executor = EngineExecutor::new(&self.code_map, invocation.common.stack_mut(), backedge_func_idx);
         let results = executor.resume_func_out_of_fuel(ctx.store, results);
         match results {
             Ok(results) => {
@@ -217,6 +221,8 @@ pub struct EngineExecutor<'engine> {
     code_map: &'engine CodeMap,
     /// The value and call stacks.
     stack: &'engine mut Stack,
+    /// The function index of `env::backedge` if it exists.
+    backedge_func_idx: Option<crate::ir::index::Func>,
 }
 
 /// Convenience function that does nothing to its `&mut` parameter.
@@ -225,8 +231,16 @@ fn do_nothing<T>(_: &mut T) {}
 
 impl<'engine> EngineExecutor<'engine> {
     /// Creates a new [`EngineExecutor`] for the given [`Stack`].
-    fn new(code_map: &'engine CodeMap, stack: &'engine mut Stack) -> Self {
-        Self { code_map, stack }
+    fn new(
+        code_map: &'engine CodeMap,
+        stack: &'engine mut Stack,
+        backedge_func_idx: Option<crate::ir::index::Func>,
+    ) -> Self {
+        Self {
+            code_map,
+            stack,
+            backedge_func_idx,
+        }
     }
 
     /// Executes the given [`Func`] using the given `params`.
@@ -365,7 +379,7 @@ impl<'engine> EngineExecutor<'engine> {
     /// When encountering a Wasm or host trap during execution.
     #[inline(always)]
     fn execute_func<T>(&mut self, store: &mut Store<T>) -> Result<(), Error> {
-        execute_instrs(store.prune(), self.stack, self.code_map)
+        execute_instrs(store.prune(), self.stack, self.code_map, self.backedge_func_idx)
     }
 
     /// Convenience forwarder to [`dispatch_host_func`].

@@ -46,6 +46,8 @@ pub struct Store<T> {
     id: TypeId,
     /// Used to restore a [`PrunedStore`] to a [`Store<T>`].
     restore_pruned: PrunedStoreVTable,
+    /// The function index of `env::backedge` if it exists.
+    backedge_func_idx: Option<crate::ir::index::Func>,
 }
 
 impl<T> Default for Store<T>
@@ -66,6 +68,7 @@ impl<T> Store<T> {
             typed: TypedStoreInner::new(data),
             id: typeid::of::<T>(),
             restore_pruned: PrunedStoreVTable::new::<T>(),
+            backedge_func_idx: None,
         }
     }
 }
@@ -89,6 +92,16 @@ impl<T> Store<T> {
     /// Consumes `self` and returns its user provided data.
     pub fn into_data(self) -> T {
         *self.typed.data
+    }
+
+    /// Returns the function index of `env::backedge` if it exists.
+    pub fn get_backedge_func_idx(&self) -> Option<crate::ir::index::Func> {
+        self.backedge_func_idx
+    }
+
+    /// Sets the function index of `env::backedge`.
+    pub fn set_backedge_func_idx(&mut self, idx: Option<u32>) {
+        self.backedge_func_idx = idx.map(crate::ir::index::Func::from);
     }
 
     /// Installs a function into the [`Store`] that will be called with the user

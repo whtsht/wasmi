@@ -1,4 +1,7 @@
-use std::{collections::HashMap, vec::Vec};
+use std::{
+    collections::{HashMap, HashSet},
+    vec::Vec,
+};
 
 pub use self::call::dispatch_host_func;
 use super::{cache::CachedInstance, InstructionPtr, Stack};
@@ -66,10 +69,11 @@ pub fn execute_instrs<'engine>(
     store: &mut PrunedStore,
     stack: &'engine mut Stack,
     code_map: &'engine CodeMap,
+    backedge_func_idx: Option<index::Func>,
 ) -> Result<(), Error> {
     let instance = stack.calls.instance_expect();
     let cache = CachedInstance::new(store.inner_mut(), instance);
-    let mut executor = Executor::new(stack, code_map, cache);
+    let mut executor = Executor::new(stack, code_map, cache, backedge_func_idx);
     if let Err(error) = executor.execute(store) {
         if error.is_out_of_fuel() {
             if let Some(frame) = executor.stack.calls.peek_mut() {
@@ -99,9 +103,11 @@ pub struct Executor<'engine> {
     /// [`Engine`]: crate::Engine
     code_map: &'engine CodeMap,
 
-    ip_counter: HashMap<InstructionPtr, u32>,
-    instr_trace: HashMap<InstructionPtr, Vec<TraceEntry>>,
-    current_trace_id: Option<InstructionPtr>,
+    ip_counter: HashMap<u32, u32>,
+    instr_trace: HashMap<u32, Vec<TraceEntry>>,
+    current_trace_id: Option<u32>,
+    backedge_func_idx: Option<index::Func>,
+    blacklist: HashSet<u32>,
 }
 
 #[derive(Debug)]
@@ -117,6 +123,7 @@ impl<'engine> Executor<'engine> {
         stack: &'engine mut Stack,
         code_map: &'engine CodeMap,
         cache: CachedInstance,
+        backedge_func_idx: Option<index::Func>,
     ) -> Self {
         let frame = stack
             .calls
@@ -136,10 +143,12 @@ impl<'engine> Executor<'engine> {
             ip_counter: HashMap::new(),
             instr_trace: HashMap::new(),
             current_trace_id: None,
+            backedge_func_idx,
+            blacklist: HashSet::new(),
         }
     }
 
-    fn run_jit(&mut self, ip: &InstructionPtr) -> InstructionPtr {
+    fn run_jit(&mut self, ip: &u32) -> InstructionPtr {
         let trace = self.instr_trace.get(ip).unwrap();
         let code = gen_code::compile_trace(trace, &self.sp).unwrap();
 
@@ -157,37 +166,20 @@ impl<'engine> Executor<'engine> {
     #[inline(always)]
     fn execute(&mut self, store: &mut PrunedStore) -> Result<(), Error> {
         use Op as Instr;
+
         loop {
-            let count = self
-                .ip_counter
-                .entry(self.ip)
-                .and_modify(|counter| *counter += 1)
-                .or_insert(1);
-            if *count == Self::HOT_PATH_THRESHOLD {
-                if self.current_trace_id.is_none() {
-                    self.current_trace_id = Some(self.ip);
-                    self.instr_trace.insert(self.ip, Vec::new());
-                }
-            }
-
             if let Some(trace_id) = self.current_trace_id {
-                // ループを一周したらトレース終了
                 let trace = self.instr_trace.get_mut(&trace_id).unwrap();
-                if trace_id == self.ip && !trace.is_empty() {
-                    self.current_trace_id = None;
-                    let ip = self.run_jit(&trace_id);
-                    self.ip = ip;
-                } else {
-                    trace.push(TraceEntry {
-                        op: *self.ip.get(),
-                        ip: self.ip,
-                    });
+                trace.push(TraceEntry {
+                    op: *self.ip.get(),
+                    ip: self.ip,
+                });
 
-                    // トレースが長すぎる場合は中断
-                    if trace.len() > Self::TRACE_MAX_LENGTH {
-                        trace.clear();
-                        self.current_trace_id = None;
-                    }
+                if trace.len() > Self::TRACE_MAX_LENGTH {
+                    std::println!("Tracing ended at ip {} due to max length", trace_id);
+                    trace.clear();
+                    self.current_trace_id = None;
+                    self.blacklist.insert(trace_id);
                 }
             }
 
@@ -460,6 +452,36 @@ impl<'engine> Executor<'engine> {
                     self.execute_call_imported_0(store, results, func)?
                 }
                 Instr::CallImported { results, func } => {
+                    if self.backedge_func_idx == Some(func) {
+                        let mut ip_copy = self.ip;
+                        ip_copy.add(1);
+                        if let Op::Slot { slot } = *ip_copy.get() {
+                            let ip: u32 = self.get_stack_slot_as(slot);
+
+                            if let Some(current_trace_id) = self.current_trace_id {
+                                std::println!("Tracing ended at ip {}", ip);
+                                if current_trace_id == ip {
+                                    self.current_trace_id = None;
+                                    let ip = self.run_jit(&current_trace_id);
+                                    self.ip = ip;
+                                }
+                            }
+
+                            let count = self
+                                .ip_counter
+                                .entry(ip)
+                                .and_modify(|counter| *counter += 1)
+                                .or_insert(1);
+                            if *count >= Self::HOT_PATH_THRESHOLD {
+                                if self.current_trace_id.is_none() && !self.blacklist.contains(&ip)
+                                {
+                                    std::println!("Tracing started at ip {}", ip);
+                                    self.current_trace_id = Some(ip);
+                                    self.instr_trace.insert(ip, Vec::new());
+                                }
+                            }
+                        }
+                    }
                     self.execute_call_imported(store, results, func)?
                 }
                 Instr::CallIndirect0 { results, func_type } => {
