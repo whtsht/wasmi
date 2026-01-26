@@ -110,7 +110,7 @@ pub struct Executor<'engine> {
     blacklist: HashSet<u32>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TraceEntry {
     pub(crate) op: Op,
     pub(crate) ip: InstructionPtr,
@@ -149,8 +149,17 @@ impl<'engine> Executor<'engine> {
     }
 
     fn run_jit(&mut self, ip: &u32) -> InstructionPtr {
-        let trace = self.instr_trace.get(ip).unwrap();
-        let code = gen_code::compile_trace(trace, &self.sp).unwrap();
+        let trace = self.instr_trace.get_mut(ip).unwrap();
+        // filter backedge call
+        let trace = trace.iter().filter(|entry| {
+            if let Op::CallImported { func, .. } = entry.op {
+                if Some(func) == self.backedge_func_idx {
+                    return false;
+                }
+            }
+            true
+        }).cloned().collect::<Vec<_>>();
+        let code = gen_code::compile_trace(&trace, &self.sp).unwrap();
 
         unsafe {
             let memory_ptr = self.cache.memory.data_mut().as_mut_ptr();
@@ -176,7 +185,7 @@ impl<'engine> Executor<'engine> {
                 });
 
                 if trace.len() > Self::TRACE_MAX_LENGTH {
-                    std::println!("Tracing ended at ip {} due to max length", trace_id);
+                    std::eprintln!("Tracing ended at ip {} due to max length", trace_id);
                     trace.clear();
                     self.current_trace_id = None;
                     self.blacklist.insert(trace_id);
@@ -459,11 +468,12 @@ impl<'engine> Executor<'engine> {
                             let ip: u32 = self.get_stack_slot_as(slot);
 
                             if let Some(current_trace_id) = self.current_trace_id {
-                                std::println!("Tracing ended at ip {}", ip);
+                                std::eprintln!("Tracing ended at ip {}", ip);
                                 if current_trace_id == ip {
                                     self.current_trace_id = None;
                                     let ip = self.run_jit(&current_trace_id);
                                     self.ip = ip;
+                                    continue;
                                 }
                             }
 
@@ -475,7 +485,7 @@ impl<'engine> Executor<'engine> {
                             if *count >= Self::HOT_PATH_THRESHOLD {
                                 if self.current_trace_id.is_none() && !self.blacklist.contains(&ip)
                                 {
-                                    std::println!("Tracing started at ip {}", ip);
+                                    std::eprintln!("Tracing started at ip {}", ip);
                                     self.current_trace_id = Some(ip);
                                     self.instr_trace.insert(ip, Vec::new());
                                 }

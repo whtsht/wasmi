@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::engine::executor::instrs::TraceEntry;
 use crate::engine::executor::stack::FrameSlots;
 use crate::ir::{Op, Slot};
@@ -105,7 +103,6 @@ pub type JitFn = unsafe extern "C" fn(*mut u64, *mut u8) -> usize;
 pub struct JitCode {
     pub func: JitFn,
     buffer: *mut u8,
-    pub code_size: usize,
 }
 
 const JIT_BUF_SIZE: usize = 256 * 1024;
@@ -702,7 +699,13 @@ impl<'a> JitContext<'a> {
     fn emit_mov_r8_to_memory_sib(&mut self, base: u8, index: u8, disp: i32, src: u8) {
         // For 8-bit operations with RSP, RBP, RSI, RDI as source, we need REX prefix
         // to access the low byte (SPL, BPL, SIL, DIL instead of AH, CH, DH, BH)
-        let needs_rex = src >= 8 || base >= 8 || index >= 8 || src == reg::RSP || src == reg::RBP || src == reg::RSI || src == reg::RDI;
+        let needs_rex = src >= 8
+            || base >= 8
+            || index >= 8
+            || src == reg::RSP
+            || src == reg::RBP
+            || src == reg::RSI
+            || src == reg::RDI;
         if needs_rex {
             let rex_byte = rex(false, src, index, base);
             self.emit(&[rex_byte]);
@@ -712,7 +715,12 @@ impl<'a> JitContext<'a> {
         if disp == 0 && (base & 7) != reg::RBP && (index & 7) != reg::RBP {
             self.emit(&[0x88, modrm(0, src, reg::RSP), sib(0, index, base)]);
         } else if disp >= -128 && disp <= 127 {
-            self.emit(&[0x88, modrm(1, src, reg::RSP), sib(0, index, base), disp as u8]);
+            self.emit(&[
+                0x88,
+                modrm(1, src, reg::RSP),
+                sib(0, index, base),
+                disp as u8,
+            ]);
         } else {
             self.emit(&[0x88, modrm(2, src, reg::RSP), sib(0, index, base)]);
             self.emit(&(disp as u32).to_le_bytes());
@@ -899,6 +907,43 @@ impl<'a> JitContext<'a> {
     }
 
     fn emit_branch(&mut self, is_last: bool, loop_start_offset: usize) {
+        if is_last {
+            let current_pos = self.offset;
+            let next_instr_pos = current_pos + 5;
+            let relative_offset = (loop_start_offset as i32) - (next_instr_pos as i32);
+            self.emit(&[opcode::JMP_REL32]);
+            self.emit(&relative_offset.to_le_bytes());
+        }
+    }
+
+    /// Emit branch for `lhs_imm <= rhs_reg` (unsigned)
+    /// CMP rhs, lhs sets flags for (rhs - lhs)
+    /// lhs <= rhs (unsigned) is equivalent to rhs >= lhs (unsigned), which is CF=0 (JAE)
+    fn emit_branch_i32_cmp_imm16_lhs_le_u(
+        &mut self,
+        lhs: i16,
+        rhs: Slot,
+        taken: bool,
+        guard_exits: &mut Vec<(usize, *const Op)>,
+        current_ip: *const Op,
+        is_last: bool,
+        loop_start_offset: usize,
+    ) {
+        let rhs_reg = self.get_operand_reg(rhs, reg::R12);
+        self.emit_cmp_r32_imm(rhs_reg, lhs);
+
+        // lhs <= rhs (unsigned) is true when rhs >= lhs (CF=0 after CMP rhs, lhs)
+        // Guard: if taken, exit when NOT (lhs <= rhs), i.e., lhs > rhs, i.e., rhs < lhs (CF=1) → JB
+        //        if not taken, exit when (lhs <= rhs), i.e., rhs >= lhs (CF=0) → JAE
+        let jcc_opcode = if taken {
+            opcode::JB_REL32 // exit if rhs < lhs (condition is false)
+        } else {
+            opcode::JAE_REL32 // exit if rhs >= lhs (condition is true)
+        };
+        self.emit(&[opcode::TWO_BYTE_PREFIX, jcc_opcode]);
+        guard_exits.push((self.offset, current_ip));
+        self.emit(&[0, 0, 0, 0]);
+
         if is_last {
             let current_pos = self.offset;
             let next_instr_pos = current_pos + 5;
@@ -1119,10 +1164,15 @@ fn extract_slots(op: &Op) -> Vec<Slot> {
             vec![*result, *value]
         }
 
-        Op::BranchI32NeImm16 { lhs, .. }
+        Op::BranchI32EqImm16 { lhs, .. }
+        | Op::BranchI32NeImm16 { lhs, .. }
         | Op::BranchI32LtUImm16Rhs { lhs, .. }
         | Op::BranchI32LeSImm16Rhs { lhs, .. } => {
             vec![*lhs]
+        }
+
+        Op::BranchI32LeUImm16Lhs { rhs, .. } => {
+            vec![*rhs]
         }
 
         Op::BranchI32Ne { lhs, rhs, .. } | Op::BranchI32LeU { lhs, rhs, .. } => {
@@ -1192,7 +1242,7 @@ fn build_slot_register_map(trace: &[TraceEntry]) -> HashMap<Slot, u8> {
 }
 
 pub fn compile_trace(trace: &[TraceEntry], fs: &FrameSlots) -> io::Result<JitCode> {
-    std::println!("{:#?}", trace);
+    std::eprintln!("{:#?}", trace);
     let buffer = unsafe {
         mmap(
             std::ptr::null_mut(),
@@ -1407,6 +1457,25 @@ pub fn compile_trace(trace: &[TraceEntry], fs: &FrameSlots) -> io::Result<JitCod
                     loop_start_offset,
                 );
             }
+            Op::BranchI32EqImm16 { lhs, rhs, .. } => {
+                let rhs_val = i16::try_from(i32::from(rhs)).unwrap();
+                let taken = if i + 1 < trace.len() {
+                    (trace[i + 1].ip.ptr as usize - entry.ip.ptr as usize) != OP_SIZE
+                } else {
+                    true
+                };
+                let is_last = i == trace.len() - 1;
+                ctx.emit_branch_i32_cmp_imm16(
+                    lhs,
+                    rhs_val,
+                    BranchCond::Eq,
+                    taken,
+                    &mut guard_exits,
+                    entry.ip.ptr,
+                    is_last,
+                    loop_start_offset,
+                );
+            }
             Op::BranchI32Ne { lhs, rhs, .. } => {
                 let taken = if i + 1 < trace.len() {
                     (trace[i + 1].ip.ptr as usize - entry.ip.ptr as usize) != OP_SIZE
@@ -1502,6 +1571,24 @@ pub fn compile_trace(trace: &[TraceEntry], fs: &FrameSlots) -> io::Result<JitCod
                     lhs,
                     rhs_val,
                     BranchCond::LeS,
+                    taken,
+                    &mut guard_exits,
+                    entry.ip.ptr,
+                    is_last,
+                    loop_start_offset,
+                );
+            }
+            Op::BranchI32LeUImm16Lhs { lhs, rhs, .. } => {
+                let lhs_val = i16::try_from(u32::from(lhs)).unwrap();
+                let taken = if i + 1 < trace.len() {
+                    (trace[i + 1].ip.ptr as usize - entry.ip.ptr as usize) != OP_SIZE
+                } else {
+                    true
+                };
+                let is_last = i == trace.len() - 1;
+                ctx.emit_branch_i32_cmp_imm16_lhs_le_u(
+                    lhs_val,
+                    rhs,
                     taken,
                     &mut guard_exits,
                     entry.ip.ptr,
@@ -1608,6 +1695,8 @@ pub fn compile_trace(trace: &[TraceEntry], fs: &FrameSlots) -> io::Result<JitCod
         i += 1;
     }
 
+    ctx.emit_branch(true, loop_start_offset);
+
     for (jmp_offset, next_ip) in guard_exits {
         let epilogue_start = ctx.get_offset();
 
@@ -1631,27 +1720,26 @@ pub fn compile_trace(trace: &[TraceEntry], fs: &FrameSlots) -> io::Result<JitCod
 
     let func: JitFn = unsafe { std::mem::transmute(start) };
 
-    // print_code(ctx.get_offset(), start);
+    print_code(ctx.get_offset(), start);
 
     Ok(JitCode {
         func,
-        buffer: start,
-        code_size: ctx.get_offset(),
+        buffer: start
     })
 }
 
 fn print_code(code_size: usize, start: *mut u8) {
-    std::println!("Generated machine code ({} bytes):", code_size);
+    std::eprintln!("Generated machine code ({} bytes):", code_size);
     let code_slice = unsafe { std::slice::from_raw_parts(start, code_size) };
     for (i, chunk) in code_slice.chunks(16).enumerate() {
-        std::print!("{:04x}: ", i * 16);
+        std::eprint!("{:04x}: ", i * 16);
         for byte in chunk {
-            std::print!("{:02x} ", byte);
+            std::eprint!("{:02x} ", byte);
         }
-        std::println!();
+        std::eprintln!();
     }
 
-    std::println!("\nDisassembly:");
+    std::eprintln!("\nDisassembly:");
     match capstone::Capstone::new()
         .x86()
         .mode(capstone::arch::x86::ArchMode::Mode64)
@@ -1671,7 +1759,7 @@ fn print_code(code_size: usize, start: *mut u8) {
                         insn.mnemonic().unwrap_or(""),
                         insn.op_str().unwrap_or("")
                     );
-                    std::println!(
+                    std::eprintln!(
                         "{:04x}: {:30} {}",
                         insn.address() - start as u64,
                         bytes_str,
@@ -1679,8 +1767,8 @@ fn print_code(code_size: usize, start: *mut u8) {
                     );
                 }
             }
-            Err(e) => std::println!("Disassembly failed: {}", e),
+            Err(e) => std::eprintln!("Disassembly failed: {}", e),
         },
-        Err(e) => std::println!("Capstone init failed: {}", e),
+        Err(e) => std::eprintln!("Capstone init failed: {}", e),
     }
 }
