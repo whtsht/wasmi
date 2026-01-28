@@ -213,3 +213,25 @@ use self::{
     table::{ElementSegment, ElementSegmentIdx, TableIdx},
 };
 pub use wasmi_core::{GlobalType, Mutability, ResourceLimiter, TrapCode, ValType, F32, F64, V128};
+
+
+#[macro_export]
+macro_rules! debug_print {
+    ($($arg:tt)*) => {
+        if std::env::var("VERBOSE").map(|v| v == "true").unwrap_or(false) {
+            std::print!($($arg)*);
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! debug_println {
+    () => {
+        $crate::debug_print!("\n")
+    };
+    ($($arg:tt)*) => {
+        if std::env::var("VERBOSE").map(|v| v == "true").unwrap_or(false) {
+            std::println!($($arg)*);
+        }
+    };
+}

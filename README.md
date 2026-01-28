@@ -17,14 +17,21 @@ std::println!("slot(4): {:?}", unsafe { u64::from(self.sp.get(Slot::from(4))) })
 - Op::Call / CallIndirect：関数呼び出し（ホスト関数がgrowする可能性）
 - Op::Return：インスタンス切り替えの可能性
 
-トレーシングJITがそもそも遅い
-- 適切なHOT_PATH_THRESHOLD、TRACE_MAX_LENGTHを選ぶ
-- ボトルネックを解消する
+~トレーシングJITがそもそも遅い~ → 杞憂だった
+まずはLuaをJITコンパイルで動くようにして
+3つくらいのプログラムでベンチマークテストをする
+
+- どのくらいパフォーマンスの課題があるのか
+- どこでパフォーマンスの課題があるのか
+  - 各関数にかかった時間
+
+- プロファイリングツール
+  - 統計情報を出力
+  - どのくらいトレーシングJITで実行されたか
+  - JITのループが何回実行されたか
 
 - トレーシングJIT実装
   - Lua JITを参考にする
-
-- プロファイリングツール
 
 
 | Continuous Integration |     Test Coverage    |  Documentation   |      Crates.io       |

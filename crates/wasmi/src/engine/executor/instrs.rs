@@ -3,6 +3,7 @@ use std::{
     vec::Vec,
 };
 
+use crate::debug_println;
 pub use self::call::dispatch_host_func;
 use super::{cache::CachedInstance, InstructionPtr, Stack};
 use crate::{
@@ -185,7 +186,7 @@ impl<'engine> Executor<'engine> {
                 });
 
                 if trace.len() > Self::TRACE_MAX_LENGTH {
-                    std::eprintln!("Tracing ended at ip {} due to max length", trace_id);
+                    debug_println!("Tracing ended at ip {} due to max length", trace_id);
                     trace.clear();
                     self.current_trace_id = None;
                     self.blacklist.insert(trace_id);
@@ -468,7 +469,7 @@ impl<'engine> Executor<'engine> {
                             let ip: u32 = self.get_stack_slot_as(slot);
 
                             if let Some(current_trace_id) = self.current_trace_id {
-                                std::eprintln!("Tracing ended at ip {}", ip);
+                                debug_println!("Tracing ended at ip {}", ip);
                                 if current_trace_id == ip {
                                     self.current_trace_id = None;
                                     let ip = self.run_jit(&current_trace_id);
@@ -485,7 +486,7 @@ impl<'engine> Executor<'engine> {
                             if *count >= Self::HOT_PATH_THRESHOLD {
                                 if self.current_trace_id.is_none() && !self.blacklist.contains(&ip)
                                 {
-                                    std::eprintln!("Tracing started at ip {}", ip);
+                                    debug_println!("Tracing started at ip {}", ip);
                                     self.current_trace_id = Some(ip);
                                     self.instr_trace.insert(ip, Vec::new());
                                 }

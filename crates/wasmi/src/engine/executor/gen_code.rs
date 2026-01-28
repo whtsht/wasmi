@@ -1,4 +1,7 @@
+#![allow(dead_code)]
+
 use crate::engine::executor::instrs::TraceEntry;
+use crate::{debug_print, debug_println};
 use crate::engine::executor::stack::FrameSlots;
 use crate::ir::{Op, Slot};
 use capstone::arch::BuildsCapstone;
@@ -1242,7 +1245,7 @@ fn build_slot_register_map(trace: &[TraceEntry]) -> HashMap<Slot, u8> {
 }
 
 pub fn compile_trace(trace: &[TraceEntry], fs: &FrameSlots) -> io::Result<JitCode> {
-    std::eprintln!("{:#?}", trace);
+    debug_println!("{:#?}", trace);
     let buffer = unsafe {
         mmap(
             std::ptr::null_mut(),
@@ -1720,7 +1723,7 @@ pub fn compile_trace(trace: &[TraceEntry], fs: &FrameSlots) -> io::Result<JitCod
 
     let func: JitFn = unsafe { std::mem::transmute(start) };
 
-    print_code(ctx.get_offset(), start);
+    // print_code(ctx.get_offset(), start);
 
     Ok(JitCode {
         func,
@@ -1729,17 +1732,17 @@ pub fn compile_trace(trace: &[TraceEntry], fs: &FrameSlots) -> io::Result<JitCod
 }
 
 fn print_code(code_size: usize, start: *mut u8) {
-    std::eprintln!("Generated machine code ({} bytes):", code_size);
+    debug_println!("Generated machine code ({} bytes):", code_size);
     let code_slice = unsafe { std::slice::from_raw_parts(start, code_size) };
     for (i, chunk) in code_slice.chunks(16).enumerate() {
-        std::eprint!("{:04x}: ", i * 16);
+        debug_print!("{:04x}: ", i * 16);
         for byte in chunk {
-            std::eprint!("{:02x} ", byte);
+            debug_print!("{:02x} ", byte);
         }
-        std::eprintln!();
+        debug_println!();
     }
 
-    std::eprintln!("\nDisassembly:");
+    debug_println!("\nDisassembly:");
     match capstone::Capstone::new()
         .x86()
         .mode(capstone::arch::x86::ArchMode::Mode64)
@@ -1759,7 +1762,7 @@ fn print_code(code_size: usize, start: *mut u8) {
                         insn.mnemonic().unwrap_or(""),
                         insn.op_str().unwrap_or("")
                     );
-                    std::eprintln!(
+                    debug_println!(
                         "{:04x}: {:30} {}",
                         insn.address() - start as u64,
                         bytes_str,
@@ -1767,8 +1770,8 @@ fn print_code(code_size: usize, start: *mut u8) {
                     );
                 }
             }
-            Err(e) => std::eprintln!("Disassembly failed: {}", e),
+            Err(e) => debug_println!("Disassembly failed: {}", e),
         },
-        Err(e) => std::eprintln!("Capstone init failed: {}", e),
+        Err(e) => debug_println!("Capstone init failed: {}", e),
     }
 }
