@@ -164,13 +164,14 @@ impl<'engine> Executor<'engine> {
 
         unsafe {
             let memory_ptr = self.cache.memory.data_mut().as_mut_ptr();
-            let ptr = (code.func)(self.sp.as_ptr() as *mut u64, memory_ptr);
+            let global_ptr = self.cache.global.as_ptr() as *mut u64;
+            let ptr = (code.func)(self.sp.as_ptr() as *mut u64, memory_ptr, global_ptr);
             InstructionPtr::new(ptr as *const Op)
         }
     }
 
     const HOT_PATH_THRESHOLD: u32 = 100;
-    const TRACE_MAX_LENGTH: usize = 200;
+    const TRACE_MAX_LENGTH: usize = 2000;
 
     /// Executes the function frame until it returns or traps.
     #[inline(always)]

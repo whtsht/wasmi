@@ -100,8 +100,8 @@ mod shift_ext {
     pub const SHL: u8 = 4;
 }
 
-// fn(*slots, *memory) -> InstructionPtr
-pub type JitFn = unsafe extern "C" fn(*mut u64, *mut u8) -> usize;
+// fn(*slots, *memory, *global) -> InstructionPtr
+pub type JitFn = unsafe extern "C" fn(*mut u64, *mut u8, *mut u64) -> usize;
 
 pub struct JitCode {
     pub func: JitFn,
@@ -375,6 +375,7 @@ impl<'a> JitContext<'a> {
         self.emit(&[opcode::REX_PREFIX_R12, opcode::PUSH_R15]);
 
         self.emit_mov_r64_r64(reg::R15, reg::RSI);
+        self.emit_mov_r64_r64(reg::R14, reg::RDX);
 
         for (&slot, &reg) in self.slot_reg_map.clone().iter() {
             let slot_idx = i16::from(slot);
@@ -844,6 +845,21 @@ impl<'a> JitContext<'a> {
         ]);
     }
 
+    fn emit_global_get(&mut self, result: Slot) {
+        let result_reg = self.slot_to_register(result).unwrap();
+        self.emit_mov_from_memory(result_reg, reg::R14, 0);
+    }
+
+    fn emit_global_set(&mut self, input: Slot) {
+        let input_reg = self.get_operand_reg(input, reg::R12);
+        self.emit_mov_to_memory(reg::R14, 0, input_reg);
+    }
+
+    fn emit_global_set_imm(&mut self, value: u64) {
+        self.emit_mov_imm64(reg::R12, value);
+        self.emit_mov_to_memory(reg::R14, 0, reg::R12);
+    }
+
     fn emit_branch_i32_cmp(
         &mut self,
         lhs: Slot,
@@ -1191,6 +1207,18 @@ fn extract_slots(op: &Op) -> Vec<Slot> {
             vec![slots[0], slots[1]]
         }
 
+        Op::GlobalGet { result, .. } => {
+            vec![*result]
+        }
+
+        Op::GlobalSet { input, .. } => {
+            vec![*input]
+        }
+
+        Op::GlobalSetI32Imm16 { .. } | Op::GlobalSetI64Imm16 { .. } => {
+            vec![]
+        }
+
         Op::Branch { .. } => {
             vec![]
         }
@@ -1219,7 +1247,6 @@ fn build_slot_register_map(trace: &[TraceEntry]) -> HashMap<Slot, u8> {
         reg::R9,
         reg::R10,
         reg::R11,
-        reg::R14,
     ];
     let mut unused_reg_index = 0;
 
@@ -1598,6 +1625,22 @@ pub fn compile_trace(trace: &[TraceEntry], fs: &FrameSlots) -> io::Result<JitCod
                     is_last,
                     loop_start_offset,
                 );
+            }
+            Op::GlobalGet { result, global } => {
+                assert_eq!(u32::from(global), 0, "JIT only supports global 0");
+                ctx.emit_global_get(result);
+            }
+            Op::GlobalSet { input, global } => {
+                assert_eq!(u32::from(global), 0, "JIT only supports global 0");
+                ctx.emit_global_set(input);
+            }
+            Op::GlobalSetI32Imm16 { input, global } => {
+                assert_eq!(u32::from(global), 0, "JIT only supports global 0");
+                ctx.emit_global_set_imm(i32::from(input) as u64);
+            }
+            Op::GlobalSetI64Imm16 { input, global } => {
+                assert_eq!(u32::from(global), 0, "JIT only supports global 0");
+                ctx.emit_global_set_imm(i64::from(input) as u64);
             }
             Op::Branch { .. } => {
                 let is_last = i == trace.len() - 1;

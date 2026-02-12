@@ -307,6 +307,12 @@ impl CachedGlobal {
         unsafe { self.data.read() }
     }
 
+    /// Returns the raw pointer to the cached global variable.
+    #[inline]
+    pub fn as_ptr(&self) -> *mut UntypedVal {
+        self.data
+    }
+
     /// Sets the value of the cached global variable to `new_value`.
     ///
     /// # Safety
